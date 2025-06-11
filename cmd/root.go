@@ -30,19 +30,20 @@ package cmd
 
 import (
 	"os"
+	"fmt"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
 	"github.com/wtsi-hgi/ibackup/set"
 )
 
-// appLogger is used for logging events in our commands.
-var appLogger = log15.New()
+// logger is used for logging events in our commands.
+var logger = log15.New()
 
 // RootCmd represents the base command when called without any subcommands.
 var RootCmd = &cobra.Command{
 	Use:   "ibackup-devkit",
-	Short: "Toolkit to wotk with ibackup database",
+	Short: "Toolkit to work with ibackup database",
 	Long: `ibackup's separate database-altering utility.
 	
 	Currently, it can only make all sets read-only.`,
@@ -67,15 +68,14 @@ func Execute() {
 
 func init() {
 	// set up logging to stdout
-	appLogger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StdoutHandler))
+	logger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StdoutHandler))
 
 	// global flags
 	RootCmd.Flags().String("database", "", "path to the ibackup database file")
-	RootCmd.Flags().String("name", "", "name of the set to update (optional)")
 
 	err := RootCmd.MarkFlagRequired("database")
 	if err != nil {
-		appLogger.Error(err.Error())
+		logger.Error(err.Error())
 		os.Exit(1)
 	}
 }
@@ -91,25 +91,24 @@ func updateDatabase(dbPath string) error {
 		return err
 	}
 
-	appLogger.Info("Updating ", len(allSets), " sets to read-only mode...")
+	logger.Info(fmt.Sprintf("Updating %d sets to read-only mode...", + len(allSets)))
 
 	for _, s := range allSets {
-		appLogger.Info("Updating set", "name", s.Name, "id", s.ID)
+		logger.Info("Updating set", "name", s.Name, "id", s.ID())
 
 		if s.ReadOnly {
-			appLogger.Info("Set is already read-only, skipping...")
+			logger.Info("Set is already read-only, skipping...")
 			continue
 		}
 
 		s.ReadOnly = true
 		err = db.AddOrUpdate(s)
 		if err != nil {
-			appLogger.Error("Failed to update set. Skipping...")
-			return err
+			logger.Error("Failed to update set. Skipping...")
 		} else {
-			appLogger.Info("Set updated successfully")
+			logger.Info("Set updated successfully")
 		}
 	}
 
-	return nil
+	return db.Close()
 }

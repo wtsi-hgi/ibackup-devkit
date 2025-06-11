@@ -26,29 +26,63 @@
 package main
 
 import (
+	"bytes"
+	"path/filepath"
+	"strconv"
 	"testing"
 
 	. "github.com/smartystreets/goconvey/convey"
 	"github.com/wtsi-hgi/ibackup-devkit/cmd"
+	"github.com/wtsi-hgi/ibackup/set"
 )
 
 func TestMain(t *testing.T) {
 	Convey("You cannot run a tool without --database flag", t, func() {
+		cmdErrs := new(bytes.Buffer)
+		cmd.RootCmd.SetErr(cmdErrs)
+		cmd.RootCmd.SetOut(cmdErrs)
+
 		err := cmd.RootCmd.Execute()
 		So(err, ShouldNotBeNil)
 		So(err.Error(), ShouldContainSubstring, "required flag(s) \"database\" not set")
 	})
 
 	Convey("Given a test database file", t, func() {
-		testDBFile := filepath.Join(t.tempDir(), "test.db")
+		testDBFile := filepath.Join(t.TempDir(), "test.db")
 		db, err := set.New(testDBFile, "", false)
 		So(err, ShouldBeNil)
+		for i := range 5 {
+			setName := "set-" + strconv.Itoa(i)
+			s := &set.Set{
+				Name:     setName,
+				ReadOnly: i%2 == 0,
+			}
+			db.AddOrUpdate(s)
+		}
 
-		Convey("You can run a tool with --database flag", t, func() {
+		err = db.Close()
+		So(err, ShouldBeNil)
+
+		Convey("You can run a tool with --database flag", func() {
 			cmd.RootCmd.SetArgs([]string{"--database", testDBFile})
+
 			err := cmd.RootCmd.Execute()
 			So(err, ShouldBeNil)
+
+			Convey("And all sets will be read-only", func() {
+				db, err := set.New(testDBFile, "", false)
+				So(err, ShouldBeNil)
+
+				allSets, err := db.GetAll()
+				So(err, ShouldBeNil)
+
+				for _, s := range allSets {
+					So(s.ReadOnly, ShouldBeTrue)
+				}
+
+				err = db.Close()
+				So(err, ShouldBeNil)
+			})
 		})
 	})
-
 }
