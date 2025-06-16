@@ -22,7 +22,7 @@ test:
 	@go test -tags netgo --count 1 .
 	@go test -tags netgo --count 1 $(shell go list ./... | tail -n+2)
 
-race: export CGO_ENABLED = 0
+race: export CGO_ENABLED = 1
 race:
 	@go test -tags netgo -race --count 1 .
 	@go test -tags netgo -race --count 1 $(shell go list ./... | tail -n+2)
