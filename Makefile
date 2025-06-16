@@ -7,29 +7,27 @@ PATH := ${PATH}:${GOPATH}/bin
 
 default: install
 
-# CGO_ENABLED=1 required because unix group lookups no longer work without it
-
-build: export CGO_ENABLED = 1
+build: export CGO_ENABLED = 0
 build:
 	go build -tags netgo ${LDFLAGS}
 
-install: export CGO_ENABLED = 1
+install: export CGO_ENABLED = 0
 install:
 	@rm -f ${GOPATH}/bin/ibackup-devkit
 	@go install -tags netgo ${LDFLAGS}
 	@echo installed to ${GOPATH}/bin/ibackup-devkit
 
-test: export CGO_ENABLED = 1
+test: export CGO_ENABLED = 0
 test:
 	@go test -tags netgo --count 1 .
 	@go test -tags netgo --count 1 $(shell go list ./... | tail -n+2)
 
-race: export CGO_ENABLED = 1
+race: export CGO_ENABLED = 0
 race:
 	@go test -tags netgo -race --count 1 .
 	@go test -tags netgo -race --count 1 $(shell go list ./... | tail -n+2)
 
-bench: export CGO_ENABLED = 1
+bench: export CGO_ENABLED = 0
 bench:
 	go test -tags netgo --count 1 -run Bench -bench=. ./...
 
@@ -41,7 +39,7 @@ clean:
 	@rm -f ./ibackup-devkit
 	@rm -f ./dist.zip
 
-dist: export CGO_ENABLED = 1
+dist: export CGO_ENABLED = 0
 # go get -u github.com/gobuild/gopack
 # go get -u github.com/aktau/github-release
 dist:

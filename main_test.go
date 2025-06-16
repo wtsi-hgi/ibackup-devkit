@@ -57,14 +57,24 @@ func TestMain(t *testing.T) {
 				Name:     setName,
 				ReadOnly: i%2 == 0,
 			}
-			db.AddOrUpdate(s)
+			err = db.AddOrUpdate(s)
+			So(err, ShouldBeNil)
 		}
 
 		err = db.Close()
 		So(err, ShouldBeNil)
 
-		Convey("You can run a tool with --database flag", func() {
-			cmd.RootCmd.SetArgs([]string{"--database", testDBFile})
+		cmdErrs := new(bytes.Buffer)
+		cmd.RootCmd.SetOut(cmdErrs)
+
+		Convey("You cannot run a tool on a non-existing database", func() {
+			cmd.RootCmd.SetArgs([]string{"--database", filepath.Join(t.TempDir(), "invalid"), "--lock-all-sets"})
+			err := cmd.RootCmd.Execute()
+			So(err.Error(), ShouldContainSubstring, "no such file or directory")
+		})
+
+		Convey("You can make all sets read-only", func() {
+			cmd.RootCmd.SetArgs([]string{"--database", testDBFile, "--lock-all-sets"})
 
 			err := cmd.RootCmd.Execute()
 			So(err, ShouldBeNil)

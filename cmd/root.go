@@ -29,8 +29,9 @@
 package cmd
 
 import (
-	"os"
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/inconshreveable/log15"
 	"github.com/spf13/cobra"
@@ -46,14 +47,30 @@ var RootCmd = &cobra.Command{
 	Short: "Toolkit to work with ibackup database",
 	Long: `ibackup's separate database-altering utility.
 	
-	Currently, it can only make all sets read-only.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
+Currently, it can only make all sets read-only.`,
+
+	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+		// set up logging to stdout
+		logHandler := log15.StreamHandler(cmd.OutOrStdout(), log15.TerminalFormat())
+		logger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, logHandler))
+	},
+
+	RunE: func(cmd *cobra.Command, _ []string) error {
 		db, err := cmd.Flags().GetString("database")
 		if err != nil {
 			return err
 		}
 
-		return updateDatabase(db)
+		makeReadOnly, err := cmd.Flags().GetBool("lock-all-sets")
+		if err != nil {
+			return err
+		}
+
+		if makeReadOnly {
+			return updateDatabase(db)
+		}
+
+		return nil
 	},
 }
 
@@ -67,11 +84,9 @@ func Execute() {
 }
 
 func init() {
-	// set up logging to stdout
-	logger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, log15.StdoutHandler))
-
 	// global flags
 	RootCmd.Flags().String("database", "", "path to the ibackup database file")
+	RootCmd.Flags().Bool("lock-all-sets", false, "make all sets in the database read-only")
 
 	err := RootCmd.MarkFlagRequired("database")
 	if err != nil {
@@ -81,6 +96,11 @@ func init() {
 }
 
 func updateDatabase(dbPath string) error {
+	_, err := os.Stat(dbPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
 	db, err := set.New(dbPath, "", false)
 	if err != nil {
 		return err
@@ -91,7 +111,7 @@ func updateDatabase(dbPath string) error {
 		return err
 	}
 
-	logger.Info(fmt.Sprintf("Updating %d sets to read-only mode...", + len(allSets)))
+	logger.Info(fmt.Sprintf("Updating %d sets to read-only mode...", len(allSets)))
 
 	for _, s := range allSets {
 		logger.Info("Updating set", "name", s.Name, "id", s.ID())
@@ -105,9 +125,10 @@ func updateDatabase(dbPath string) error {
 		err = db.AddOrUpdate(s)
 		if err != nil {
 			logger.Error("Failed to update set. Skipping...")
-		} else {
-			logger.Info("Set updated successfully")
+			continue
 		}
+
+		logger.Info("Set updated successfully")
 	}
 
 	return db.Close()
