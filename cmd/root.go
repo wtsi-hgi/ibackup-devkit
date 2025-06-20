@@ -114,7 +114,7 @@ func updateDatabase(dbPath string) error {
 	logger.Info(fmt.Sprintf("Updating %d sets to read-only mode...", len(allSets)))
 
 	for _, s := range allSets {
-		logger.Info("Updating set", "name", s.Name, "id", s.ID())
+		logger.Info("Updating set", "user", s.Requester, "name", s.Name, "id", s.ID())
 
 		if s.ReadOnly {
 			logger.Info("Set is already read-only, skipping...")
@@ -124,7 +124,7 @@ func updateDatabase(dbPath string) error {
 		s.ReadOnly = true
 		err = db.AddOrUpdate(s)
 		if err != nil {
-			logger.Error("Failed to update set. Skipping...")
+			logger.Error("Failed to update set. Skipping...", "err", err)
 			continue
 		}
 
