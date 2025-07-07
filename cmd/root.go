@@ -29,8 +29,6 @@
 package cmd
 
 import (
-	"errors"
-	"fmt"
 	"os"
 
 	"github.com/inconshreveable/log15"
@@ -111,7 +109,7 @@ func init() {
 
 func getAllSets(dbPath string) ([]*set.Set, *set.DB, error) {
 	_, err := os.Stat(dbPath)
-	if errors.Is(err, os.ErrNotExist) {
+	if err != nil {
 		return nil, nil, err
 	}
 
@@ -138,7 +136,7 @@ func makeSetsReadOnly(db *set.DB, allSets []*set.Set) {
 
 func updateSetsProperty(db *set.DB, allSets []*set.Set, propertyName string,
 	skipSet func(*set.Set) bool, propertySelector func(*set.Set) *bool) {
-	logger.Info(fmt.Sprintf("updating %d sets to %s...", len(allSets), propertyName))
+	logger.Info("updating sets...", "num", len(allSets), "property", propertyName)
 
 	for _, s := range allSets {
 		if skipSet(s) {
@@ -165,8 +163,6 @@ func updateSetsProperty(db *set.DB, allSets []*set.Set, propertyName string,
 
 		logger.Info("updated set", "user", s.Requester, "name", s.Name, "id", s.ID())
 	}
-
-	return
 }
 
 func makeReadOnlySetsHidden(db *set.DB, allSets []*set.Set) {

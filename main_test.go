@@ -73,6 +73,36 @@ func TestMain(t *testing.T) {
 			So(err.Error(), ShouldContainSubstring, "no such file or directory")
 		})
 
+		getAllSets := func() ([]*set.Set, *set.DB) {
+			db, err := set.New(testDBFile, "", false)
+			So(err, ShouldBeNil)
+
+			allSets, err := db.GetAll()
+			So(err, ShouldBeNil)
+
+			return allSets, db
+		}
+
+		Convey("You can hide read-only sets", func() {
+			cmd.RootCmd.SetArgs([]string{"--database", testDBFile, "--hide-readonly"})
+
+			err := cmd.RootCmd.Execute()
+			So(err, ShouldBeNil)
+
+			allSets, db := getAllSets()
+
+			for _, s := range allSets {
+				if s.ReadOnly {
+					So(s.Hide, ShouldBeTrue)
+				} else {
+					So(s.Hide, ShouldBeFalse)
+				}
+			}
+
+			err = db.Close()
+			So(err, ShouldBeNil)
+		})
+
 		Convey("You can make all sets read-only", func() {
 			cmd.RootCmd.SetArgs([]string{"--database", testDBFile, "--lock-all-sets"})
 
@@ -80,11 +110,7 @@ func TestMain(t *testing.T) {
 			So(err, ShouldBeNil)
 
 			Convey("And all sets will be read-only", func() {
-				db, err := set.New(testDBFile, "", false)
-				So(err, ShouldBeNil)
-
-				allSets, err := db.GetAll()
-				So(err, ShouldBeNil)
+				allSets, db := getAllSets()
 
 				for _, s := range allSets {
 					So(s.ReadOnly, ShouldBeTrue)
@@ -92,6 +118,22 @@ func TestMain(t *testing.T) {
 
 				err = db.Close()
 				So(err, ShouldBeNil)
+
+				Convey("Then you can hide the newly read-only sets as well", func() {
+					cmd.RootCmd.SetArgs([]string{"--database", testDBFile, "--hide-readonly"})
+
+					err := cmd.RootCmd.Execute()
+					So(err, ShouldBeNil)
+
+					allSets, db = getAllSets()
+
+					for _, s := range allSets {
+						So(s.Hide, ShouldBeTrue)
+					}
+
+					err = db.Close()
+					So(err, ShouldBeNil)
+				})
 			})
 		})
 	})
