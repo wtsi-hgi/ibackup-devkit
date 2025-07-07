@@ -127,48 +127,73 @@ func getAllSets(dbPath string) ([]*set.Set, *set.DB, error) {
 }
 
 func makeSetsReadOnly(db *set.DB, allSets []*set.Set) {
-	updateSetsProperty(db, allSets, "read-only", func(*set.Set) bool {
-		return false
-	}, func(s *set.Set) *bool {
-		return &s.ReadOnly
-	})
-}
-
-func updateSetsProperty(db *set.DB, allSets []*set.Set, propertyName string,
-	skipSet func(*set.Set) bool, propertySelector func(*set.Set) *bool) {
-	logger.Info("updating sets...", "num", len(allSets), "property", propertyName)
+	logStarting(allSets, "read-only")
 
 	for _, s := range allSets {
-		if skipSet(s) {
-			logger.Info("skipping set (filtered)", "user", s.Requester, "name", s.Name, "id", s.ID())
-
+		if !makeBoolTrue(&s.ReadOnly, s) {
 			continue
 		}
-
-		property := propertySelector(s)
-		if *property {
-			logger.Info("skipping set (already done)", "user", s.Requester, "name", s.Name, "id", s.ID())
-
-			continue
-		}
-
-		*property = true
 
 		err := db.AddOrUpdate(s)
 		if err != nil {
-			logger.Error("failed to update set", "user", s.Requester, "name", s.Name, "id", s.ID(), "err", err)
+			logUpdateFailure(s, err)
 
 			continue
 		}
 
-		logger.Info("updated set", "user", s.Requester, "name", s.Name, "id", s.ID())
+		logUpdateSuccess(s)
 	}
 }
 
+func logStarting(allSets []*set.Set, propertyName string) {
+	logger.Info("updating sets...", "num", len(allSets), "property", propertyName)
+}
+
+func makeBoolTrue(b *bool, s *set.Set) bool {
+	if *b {
+		logSkippingSet(s, "already done")
+
+		return false
+	}
+
+	*b = true
+
+	return true
+}
+
+func logSkippingSet(s *set.Set, reason string) {
+	logger.Info("skipping set", "user", s.Requester, "name", s.Name, "id", s.ID(), "reason", reason)
+}
+
+func logUpdateFailure(s *set.Set, err error) {
+	logger.Error("failed to update set", "user", s.Requester, "name", s.Name, "id", s.ID(), "err", err)
+}
+
+func logUpdateSuccess(s *set.Set) {
+	logger.Info("updated set", "user", s.Requester, "name", s.Name, "id", s.ID())
+}
+
 func makeReadOnlySetsHidden(db *set.DB, allSets []*set.Set) {
-	updateSetsProperty(db, allSets, "hidden", func(s *set.Set) bool {
-		return !s.ReadOnly
-	}, func(s *set.Set) *bool {
-		return &s.Hide
-	})
+	logStarting(allSets, "hidden")
+
+	for _, s := range allSets {
+		if !s.ReadOnly {
+			logSkippingSet(s, "not read-only")
+
+			continue
+		}
+
+		if !makeBoolTrue(&s.Hide, s) {
+			continue
+		}
+
+		err := db.Hide(s)
+		if err != nil {
+			logUpdateFailure(s, err)
+
+			continue
+		}
+
+		logUpdateSuccess(s)
+	}
 }

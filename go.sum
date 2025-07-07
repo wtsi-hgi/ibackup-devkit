@@ -199,8 +199,8 @@ github.com/ugorji/go/codec v1.3.0 h1:Qd2W2sQawAfG8XSvzwhBeoGq71zXOC/Q1E9y/wUcsUA
 github.com/ugorji/go/codec v1.3.0/go.mod h1:pRBVtBSKl77K30Bv8R2P+cLSGaTtex6fsA2Wjqmfxj4=
 github.com/wtsi-hgi/go-authserver v1.5.1 h1:v6zLNiQfD44L4uzgaSG1W+KbnkkQzNJUDFrTnEFUcOI=
 github.com/wtsi-hgi/go-authserver v1.5.1/go.mod h1:M13uQ/KBAZFTodW32wsrKBwonOw5lQneiiq6wUuTdtA=
-github.com/wtsi-hgi/ibackup v1.10.0 h1:whAHWNXapJPShDwheHCf+IhRz35O+EPKbu5mUvL8+pg=
-github.com/wtsi-hgi/ibackup v1.10.0/go.mod h1:gw+Zs30Tmv+j7rGqQNYqoxWEemdo3E4B8dWR9n5mObU=
+github.com/wtsi-hgi/ibackup v1.10.1 h1:KwNv9e0qDEcHRH7+shwfOWfW1su4G+JxekV5EA0MHw4=
+github.com/wtsi-hgi/ibackup v1.10.1/go.mod h1:gw+Zs30Tmv+j7rGqQNYqoxWEemdo3E4B8dWR9n5mObU=
 github.com/wtsi-npg/logshim v1.5.0 h1:Ror+LE2DCbTytMTYGEpYpoAOX2Qpat5vYa8BPvyglyI=
 github.com/wtsi-npg/logshim v1.5.0/go.mod h1:e3+dd6fWzRpX+Lk2JM6s13F7BRypHutzatIxZklY1NI=
 github.com/wtsi-npg/logshim-zerolog v1.5.0 h1:i6lE9Y99PRPGmJ7IkMiTm4a7QwLHYe/gsykSDS+g4KI=

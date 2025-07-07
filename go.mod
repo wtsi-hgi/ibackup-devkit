@@ -6,7 +6,7 @@ require (
 	github.com/inconshreveable/log15 v3.0.0-testing.5+incompatible
 	github.com/smartystreets/goconvey v1.8.1
 	github.com/spf13/cobra v1.9.1
-	github.com/wtsi-hgi/ibackup v1.10.0
+	github.com/wtsi-hgi/ibackup v1.10.1
 )
 
 require (
