@@ -47,7 +47,7 @@ var RootCmd = &cobra.Command{
 	Short: "Toolkit to work with ibackup database",
 	Long: `ibackup's separate database-altering utility.
 	
-Currently, it can only make all sets read-only.`,
+It carries out alterations to all sets in the database.`,
 
 	PersistentPreRun: func(cmd *cobra.Command, _ []string) {
 		// set up logging to stdout
@@ -56,7 +56,7 @@ Currently, it can only make all sets read-only.`,
 	},
 
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		db, err := cmd.Flags().GetString("database")
+		dbPath, err := cmd.Flags().GetString("database")
 		if err != nil {
 			return err
 		}
@@ -66,11 +66,25 @@ Currently, it can only make all sets read-only.`,
 			return err
 		}
 
-		if makeReadOnly {
-			return updateDatabase(db)
+		hideReadOnly, err := cmd.Flags().GetBool("hide-readonly")
+		if err != nil {
+			return err
 		}
 
-		return nil
+		sets, db, err := getAllSets(dbPath)
+		if err != nil {
+			return err
+		}
+
+		if makeReadOnly {
+			makeSetsReadOnly(db, sets)
+		}
+
+		if hideReadOnly {
+			makeReadOnlySetsHidden(db, sets)
+		}
+
+		return db.Close()
 	},
 }
 
@@ -84,9 +98,9 @@ func Execute() {
 }
 
 func init() {
-	// global flags
 	RootCmd.Flags().String("database", "", "path to the ibackup database file")
 	RootCmd.Flags().Bool("lock-all-sets", false, "make all sets in the database read-only")
+	RootCmd.Flags().Bool("hide-readonly", false, "make all read-only sets in the database hidden")
 
 	err := RootCmd.MarkFlagRequired("database")
 	if err != nil {
@@ -95,41 +109,70 @@ func init() {
 	}
 }
 
-func updateDatabase(dbPath string) error {
+func getAllSets(dbPath string) ([]*set.Set, *set.DB, error) {
 	_, err := os.Stat(dbPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, nil, err
 	}
 
 	db, err := set.New(dbPath, "", false)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
 	allSets, err := db.GetAll()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	logger.Info(fmt.Sprintf("Updating %d sets to read-only mode...", len(allSets)))
+	return allSets, db, nil
+}
+
+func makeSetsReadOnly(db *set.DB, allSets []*set.Set) {
+	updateSetsProperty(db, allSets, "read-only", func(*set.Set) bool {
+		return false
+	}, func(s *set.Set) *bool {
+		return &s.ReadOnly
+	})
+}
+
+func updateSetsProperty(db *set.DB, allSets []*set.Set, propertyName string,
+	skipSet func(*set.Set) bool, propertySelector func(*set.Set) *bool) {
+	logger.Info(fmt.Sprintf("updating %d sets to %s...", len(allSets), propertyName))
 
 	for _, s := range allSets {
-		logger.Info("Updating set", "user", s.Requester, "name", s.Name, "id", s.ID())
+		if skipSet(s) {
+			logger.Info("skipping set (filtered)", "user", s.Requester, "name", s.Name, "id", s.ID())
 
-		if s.ReadOnly {
-			logger.Info("Set is already read-only, skipping...")
 			continue
 		}
 
-		s.ReadOnly = true
-		err = db.AddOrUpdate(s)
+		property := propertySelector(s)
+		if *property {
+			logger.Info("skipping set (already done)", "user", s.Requester, "name", s.Name, "id", s.ID())
+
+			continue
+		}
+
+		*property = true
+
+		err := db.AddOrUpdate(s)
 		if err != nil {
-			logger.Error("Failed to update set. Skipping...", "err", err)
+			logger.Error("failed to update set", "user", s.Requester, "name", s.Name, "id", s.ID(), "err", err)
+
 			continue
 		}
 
-		logger.Info("Set updated successfully")
+		logger.Info("updated set", "user", s.Requester, "name", s.Name, "id", s.ID())
 	}
 
-	return db.Close()
+	return
+}
+
+func makeReadOnlySetsHidden(db *set.DB, allSets []*set.Set) {
+	updateSetsProperty(db, allSets, "hidden", func(s *set.Set) bool {
+		return !s.ReadOnly
+	}, func(s *set.Set) *bool {
+		return &s.Hide
+	})
 }
