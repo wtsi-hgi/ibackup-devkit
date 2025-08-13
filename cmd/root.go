@@ -52,7 +52,14 @@ It carries out alterations to all sets in the database.`,
 		logHandler := log15.StreamHandler(cmd.OutOrStdout(), log15.TerminalFormat())
 		logger.SetHandler(log15.LvlFilterHandler(log15.LvlInfo, logHandler))
 	},
+}
 
+var boltCmd = &cobra.Command{
+	Use:   "bolt",
+	Short: "Update records in the bolt database",
+	Long: `Update records in the bolt database
+
+It carries out alterations to all sets in the database.`,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		dbPath, err := cmd.Flags().GetString("database")
 		if err != nil {
@@ -96,15 +103,17 @@ func Execute() {
 }
 
 func init() {
-	RootCmd.Flags().String("database", "", "path to the ibackup database file")
-	RootCmd.Flags().Bool("lock-all-sets", false, "make all sets in the database read-only")
-	RootCmd.Flags().Bool("hide-readonly", false, "make all read-only sets in the database hidden")
+	boltCmd.Flags().String("database", "", "path to the ibackup database file")
+	boltCmd.Flags().Bool("lock-all-sets", false, "make all sets in the database read-only")
+	boltCmd.Flags().Bool("hide-readonly", false, "make all read-only sets in the database hidden")
 
-	err := RootCmd.MarkFlagRequired("database")
+	err := boltCmd.MarkFlagRequired("database")
 	if err != nil {
 		logger.Error(err.Error())
 		os.Exit(1)
 	}
+
+	RootCmd.AddCommand(boltCmd)
 }
 
 func getAllSets(dbPath string) ([]*set.Set, *set.DB, error) {

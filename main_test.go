@@ -36,7 +36,7 @@ import (
 	"github.com/wtsi-hgi/ibackup/set"
 )
 
-func TestMain(t *testing.T) {
+func TestBolt(t *testing.T) {
 	Convey("You cannot run a tool without --database flag", t, func() {
 		cmdErrs := new(bytes.Buffer)
 		cmd.RootCmd.SetErr(cmdErrs)
