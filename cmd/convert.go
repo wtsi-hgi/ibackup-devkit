@@ -7,6 +7,7 @@ import (
 	"github.com/wtsi-hgi/ibackup/transfer"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 var ErrWrongTransformer = errors.New("wrong transformer")
 var ErrNoSQLCredentials = errors.New("connection details for MySQL are not set")
 var ErrWrongMetadata = errors.New("wrong metadata value for key")
+var ErrWrongType = errors.New("unknown type")
 
 func buildURL(host, port, dbName, user, password string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, password, host, port, dbName)
@@ -86,7 +88,8 @@ var convertCmd = &cobra.Command{
 		}()
 
 		for _, s := range sets {
-			err = transferSet(sqlDB, s)
+			logger.Info("Transferring set: %s of %s", s.Name, s.Requester)
+			err = transferAllDataForSet(boltDB, sqlDB, s)
 			if err != nil {
 				return err
 			}
@@ -107,29 +110,40 @@ func init() {
 	RootCmd.AddCommand(convertCmd)
 }
 
-func transferSet(sqlDB *db.DB, s *set.Set) error {
-	sqlSet, err := convertSet(s)
+func transferAllDataForSet(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
+	newSet, err := transferSet(sqlDB, s)
 	if err != nil {
 		return err
+	}
+
+	err = transferFiles(boltDB, sqlDB, s)
+	if err != nil {
+		return err
+	}
+
+	if s.ReadOnly {
+		err = sqlDB.SetSetReadonly(newSet)
+	}
+
+	return err
+}
+
+func transferSet(sqlDB *db.DB, s *set.Set) (*db.Set, error) {
+	sqlSet, err := convertSet(s)
+	if err != nil {
+		return nil, err
 	}
 
 	err = sqlDB.CreateSet(sqlSet)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if s.Hide {
 		err = sqlDB.SetSetHidden(sqlSet)
-		if err != nil {
-			return err
-		}
 	}
 
-	if s.ReadOnly {
-		return sqlDB.SetSetReadonly(sqlSet)
-	}
-
-	return nil
+	return sqlSet, err
 }
 
 func convertSet(boltSet *set.Set) (*db.Set, error) {
@@ -226,4 +240,71 @@ func convertTransformer(transformer string) (*db.Transformer, error) {
 	}
 
 	return db.NewTransformer(name, match, replace)
+}
+
+func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
+	files, err := boltDB.GetPureFileEntries(s.ID())
+	if err != nil {
+		return err
+	}
+
+	newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+	if err != nil {
+		return err
+	}
+
+	newFiles := make([]*db.File, len(files))
+	for i, file := range files {
+		newFiles[i], err = convertFile(file)
+		if err != nil {
+			return err
+		}
+	}
+
+	return sqlDB.CompleteDiscovery(newSet, slices.Values(newFiles), noSeq[*db.File])
+}
+
+func noSeq[T any](_ func(T) bool) {}
+
+func convertFile(file *set.Entry) (*db.File, error) {
+	newType, err := convertFileType(file.Type)
+	if err != nil {
+		return nil, err
+	}
+
+	newFile := &db.File{
+		LocalPath: file.Path,
+		//RemotePath: "",
+		Size:  file.Size,
+		Inode: file.Inode,
+		//MountPount: "",
+		//Btime: 0,
+		//Mtime: 0,
+		Type: newType,
+	}
+
+	return newFile, nil
+}
+
+func convertFileType(t set.EntryType) (db.FileType, error) {
+	var newType db.FileType
+
+	switch t {
+	case set.Regular:
+		newType = db.Regular
+	case set.Hardlink:
+		newType = db.Hardlink
+	case set.Symlink:
+		newType = db.Symlink
+	case set.Directory:
+		newType = db.Directory
+	case set.Abnormal:
+		newType = db.Abnormal
+	case set.Unknown:
+		newType = db.Unknown
+	default:
+		return newType, fmt.Errorf("%w: %d", ErrWrongType, t)
+	}
+
+	return newType, nil
 }
