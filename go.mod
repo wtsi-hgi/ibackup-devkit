@@ -6,10 +6,12 @@ require (
 	github.com/inconshreveable/log15 v3.0.0-testing.5+incompatible
 	github.com/smartystreets/goconvey v1.8.1
 	github.com/spf13/cobra v1.9.1
-	github.com/wtsi-hgi/ibackup v1.10.1
+	github.com/wtsi-hgi/ibackup v1.10.3-0.20250813093523-2326b14e1380
+	modernc.org/sqlite v1.38.0
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/VertebrateResequencing/wr v0.36.0 // indirect
 	github.com/appleboy/gin-jwt/v2 v2.10.2 // indirect
 	github.com/bytedance/sonic v1.13.3 // indirect
@@ -28,9 +30,12 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.27.0 // indirect
 	github.com/go-resty/resty/v2 v2.16.5 // indirect
+	github.com/go-sql-driver/mysql v1.9.3 // indirect
 	github.com/go-stack/stack v1.8.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.1 // indirect
+	github.com/google/pprof v0.0.0-20250607225305-033d6d78b36a // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/gopherjs/gopherjs v1.17.2 // indirect
 	github.com/gorilla/securecookie v1.1.2 // indirect
 	github.com/gorilla/sessions v1.4.0 // indirect
@@ -55,10 +60,12 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/mojocn/sseread v1.0.9 // indirect
+	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/okta/okta-jwt-verifier-golang v1.3.1 // indirect
 	github.com/patrickmn/go-cache v2.1.0+incompatible // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/sb10/l15h v0.0.0-20170510122137-64c488bf8e22 // indirect
@@ -75,15 +82,19 @@ require (
 	go.etcd.io/bbolt v1.4.2 // indirect
 	golang.org/x/arch v0.18.0 // indirect
 	golang.org/x/crypto v0.39.0 // indirect
+	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	golang.org/x/net v0.41.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.15.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 	google.golang.org/protobuf v1.36.6 // indirect
 	gopkg.in/tylerb/graceful.v1 v1.2.15 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
+	modernc.org/libc v1.66.3 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.11.0 // indirect
 )
 
 // we need to specify these due to github.com/VertebrateResequencing/wr's deps
