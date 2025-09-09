@@ -19,6 +19,7 @@ var ErrWrongTransformer = errors.New("wrong transformer")
 var ErrNoSQLCredentials = errors.New("connection details for MySQL are not set")
 var ErrWrongMetadata = errors.New("wrong metadata value for key")
 var ErrWrongType = errors.New("unknown type")
+var ErrWrongStatus = errors.New("unknown status")
 
 func buildURL(host, port, dbName, user, password string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, password, host, port, dbName)
@@ -261,13 +262,67 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 		}
 	}
 
-	return sqlDB.CompleteDiscovery(newSet, slices.Values(newFiles), noSeq[*db.File])
+	err = sqlDB.CompleteDiscovery(newSet, slices.Values(newFiles), noSeq[*db.File])
+	if err != nil {
+		return err
+	}
+
+	p, err := sqlDB.RegisterProcess()
+	if err != nil {
+		return err
+	}
+
+	itErr := sqlDB.ReserveTasks(p, len(files))
+
+	var tasks []*db.Task
+	err = itErr.ForEach(func(task *db.Task) error {
+		tasks = append(tasks, task)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, task := range tasks {
+		file := matchFile(task, files)
+		switch file.Status {
+		case set.Failed:
+			err = sqlDB.TaskFailed(task)
+			if err != nil {
+				return err
+			}
+		case set.Uploaded, set.Replaced, set.Skipped, set.Orphaned:
+			err = sqlDB.TaskComplete(task)
+			if err != nil {
+				return err
+			}
+		default:
+			log.Printf("Cannot handle file %s with status %s", file.Path, file.Status)
+		}
+	}
+
+	return nil
+}
+
+func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
+	for _, file := range files {
+		if file.Path == task.LocalPath {
+			return file
+		}
+	}
+
+	return nil
 }
 
 func noSeq[T any](_ func(T) bool) {}
 
 func convertFile(file *set.Entry) (*db.File, error) {
 	newType, err := convertFileType(file.Type)
+	if err != nil {
+		return nil, err
+	}
+
+	newStatus, err := convertFileStatus(file.Status)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +335,8 @@ func convertFile(file *set.Entry) (*db.File, error) {
 		//MountPount: "",
 		//Btime: 0,
 		//Mtime: 0,
-		Type: newType,
+		Type:   newType,
+		Status: newStatus,
 	}
 
 	return newFile, nil
@@ -308,3 +364,51 @@ func convertFileType(t set.EntryType) (db.FileType, error) {
 
 	return newType, nil
 }
+
+func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
+	var newStatus db.FileStatus
+
+	switch status {
+	case set.Pending:
+		newStatus = db.StatusNone
+	case set.UploadingEntry:
+		newStatus = db.StatusNone
+	case set.Uploaded:
+		newStatus = db.StatusUploaded
+	case set.Failed:
+		newStatus = db.StatusNone
+	case set.Missing:
+		newStatus = db.StatusMissing
+	case set.AbnormalEntry:
+		newStatus = db.StatusNone
+	case set.Replaced:
+		newStatus = db.StatusReplaced
+	case set.Skipped:
+		newStatus = db.StatusSkipped
+	case set.Orphaned:
+		newStatus = db.StatusOrphaned
+	case set.Registered:
+		newStatus = db.StatusNone
+	default:
+		return newStatus, fmt.Errorf("%w: %d", ErrWrongStatus, status)
+	}
+
+	return newStatus, nil
+}
+
+//func handleSetStatus(sqlDB *db.DB, sqlSet *db.Set) error {
+//	switch sqlSet.Status {
+//	case db.PendingDiscovery:
+//		return nil
+//	case db.PendingUpload:
+//		return nil
+//	case db.Uploading:
+//		return nil
+//	case db.Failing:
+//		return nil
+//	case db.Complete:
+//		return sqlDB.CompleteDiscovery(sqlSet)
+//	default:
+//		return fmt.Errorf("%w: %d", ErrWrongStatus, sqlSet.Status)
+//	}
+//}

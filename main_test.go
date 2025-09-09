@@ -152,9 +152,62 @@ func TestBolt(t *testing.T) {
 
 const (
 	testSetsNum    = 5
-	testFilesNum   = 10
 	maxFilesPerSet = 5
 )
+
+//func TestConvert(t *testing.T) {
+//	cmdErrs := new(bytes.Buffer)
+//	cmd.RootCmd.SetOut(cmdErrs)
+//
+//	Convey("Given an empty MySQL database", t, func() {
+//		url, err := cmd.BuildSQLURL()
+//		So(err, ShouldBeNil)
+//
+//		resetDatabase(t)
+//
+//		sqlDB, err := db.Init("mysql", url)
+//		So(err, ShouldBeNil)
+//
+//		defer callAndLogError(t, sqlDB.Close)
+//
+//		Convey("And an empty Bolt database", func() {
+//			testBoltFile := filepath.Join(t.TempDir(), "test.db")
+//			boltDB, err := set.New(testBoltFile, "", false)
+//			So(err, ShouldBeNil)
+//
+//			Convey("You can transfer empty sets", func() {
+//				testSets := generateRandomSets(testSetsNum)
+//				for _, s := range testSets {
+//					s.Status = set.Complete
+//
+//					err = boltDB.AddOrUpdate(s)
+//					So(err, ShouldBeNil)
+//				}
+//
+//				err = boltDB.Close()
+//				So(err, ShouldBeNil)
+//
+//				cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
+//
+//				err = cmd.RootCmd.Execute()
+//				So(err, ShouldBeNil)
+//
+//				for _, s := range testSets {
+//					Convey(fmt.Sprintf("check set %s", s.Name), func() {
+//						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+//						So(err, ShouldBeNil)
+//
+//						checkSetsIdentical(t, s, newSet)
+//					})
+//				}
+//			})
+//		})
+//	})
+//}
+
+var successfulStatuses = []transfer.RequestStatus{
+	transfer.RequestStatusUploaded, transfer.RequestStatusOrphaned, transfer.RequestStatusReplaced, transfer.RequestStatusUnmodified,
+}
 
 func TestConvert(t *testing.T) {
 	Convey("Given a test bolt database", t, func() {
@@ -181,13 +234,15 @@ func TestConvert(t *testing.T) {
 				prefix = "/lustre"
 			}
 
-			//fmt.Println("Generating files for transformer:", s.Transformer)
-			setFiles := generateRandomFiles(rand.Intn(maxFilesPerSet-1)+1, prefix)
-			//fmt.Println(setFiles)
-			err = boltDB.MergeFileEntries(s.ID(), setFiles)
-			So(err, ShouldBeNil)
-
+			setFiles := generateRandomFiles(rand.Intn(maxFilesPerSet), prefix)
 			filesMap[s] = setFiles
+
+			if len(setFiles) > 0 {
+				err = boltDB.MergeFileEntries(s.ID(), setFiles)
+				So(err, ShouldBeNil)
+			}
+
+			setRandomFileStatus(t, boltDB, s, setFiles)
 		}
 
 		err = boltDB.Close()
@@ -202,19 +257,8 @@ func TestConvert(t *testing.T) {
 
 			sqlDB, err := db.Init("mysql", url)
 			So(err, ShouldBeNil)
-			//})
-			//
-			//SkipConvey("And a test SQLite database", func() {
-			//	testBoltFile = filepath.Join(t.TempDir(), "db?journal_mode=WAL")
-			//	sqlDB, err := db.Init("sqlite", testBoltFile)
-			//	So(err, ShouldBeNil)
 
-			defer func() {
-				err = sqlDB.Close()
-				if err != nil {
-					t.Log(err)
-				}
-			}()
+			defer callAndLogError(t, sqlDB.Close)
 
 			resetDatabase(t)
 
@@ -225,13 +269,15 @@ func TestConvert(t *testing.T) {
 				So(err, ShouldBeNil)
 
 				for _, s := range testSets {
-					newSet, err := sqlDB.GetSet(s.Name, s.Requester)
-					So(err, ShouldBeNil)
+					Convey(fmt.Sprintf("check set %s", s.Name), func() {
+						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+						So(err, ShouldBeNil)
 
-					checkSetsIdentical(t, s, newSet)
+						checkSetsIdentical(t, s, newSet)
 
-					newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
-					checkFilesIdentical(t, filesMap[s], newFiles)
+						newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
+						checkFilesIdentical(t, filesMap[s], newFiles)
+					})
 				}
 			})
 		})
@@ -254,6 +300,7 @@ func generateRandomSets(n int) []*set.Set {
 			},
 			ReadOnly: randomChoice(true, false),
 			Hide:     randomChoice(true, false),
+			Status:   randomChoice(set.PendingDiscovery, set.PendingUpload, set.Uploading, set.Failing, set.Complete),
 		}
 
 		testSets[i] = s
@@ -266,10 +313,12 @@ func randomChoice[T any](options ...T) T {
 	return options[rand.Intn(len(options))]
 }
 
-func randomSubset[T any](options []T, n int) []T {
+func randomSubset[T comparable](options []T, n int) []T {
 	subset := make([]T, n)
+
 	for i := range n {
 		subset[i] = randomChoice(options...)
+		options = removeValue(options, subset[i])
 	}
 	return subset
 }
@@ -329,7 +378,7 @@ func generateRandomFiles(n int, prefix string) []string {
 	files := make([]string, n)
 
 	for i := range n {
-		dir1 := fmt.Sprintf("dir%d", rand.Intn(i+1))
+		dir1 := fmt.Sprintf("project%d", rand.Intn(i+1))
 		filename := fmt.Sprintf("file%d.txt", i)
 		files[i] = filepath.Join(prefix, dir1, filename)
 	}
@@ -360,4 +409,75 @@ func collectIter[T any](t *testing.T, i *db.IterErr[T]) []T {
 	So(err, ShouldBeNil)
 
 	return vs
+}
+
+func callAndLogError(t *testing.T, f func() error) {
+	t.Helper()
+
+	err := f()
+	if err != nil {
+		t.Log(err)
+	}
+}
+
+func removeValue[T comparable](slice []T, value T) []T {
+	result := slice[:0]
+	for _, v := range slice {
+		if v != value {
+			result = append(result, v)
+		}
+	}
+	return result
+}
+
+// Difference returns a slice containing all elements of slice1 that are not present in slice2.
+func Difference[T comparable](slice1, slice2 []T) []T {
+	lookup := make(map[T]struct{})
+	for _, v := range slice2 {
+		lookup[v] = struct{}{}
+	}
+
+	var diff []T
+	for _, v := range slice1 {
+		if _, found := lookup[v]; !found {
+			diff = append(diff, v)
+		}
+	}
+
+	return diff
+}
+
+func setFileStatus(boltDB *set.DB, s *set.Set, path string, status transfer.RequestStatus) error {
+	_, err := boltDB.SetEntryStatus(
+		&transfer.Request{
+			Set:       s.Name,
+			Requester: s.Requester,
+			Local:     path,
+			Status:    status,
+		})
+
+	return err
+}
+
+func setRandomFileStatus(t *testing.T, boltDB *set.DB, s *set.Set, files []string) {
+	t.Helper()
+
+	successfulFiles := make([]string, len(files))
+	copy(successfulFiles, files)
+
+	var failingFiles []string
+	if s.Status == set.Failing {
+		failingFiles = randomSubset(files, len(files))
+		successfulFiles = Difference(successfulFiles, failingFiles)
+	}
+
+	for _, file := range successfulFiles {
+		err := setFileStatus(boltDB, s, file, randomChoice(successfulStatuses...))
+		So(err, ShouldBeNil)
+	}
+
+	for _, file := range failingFiles {
+		err := setFileStatus(boltDB, s, file, transfer.RequestStatusFailed)
+		So(err, ShouldBeNil)
+	}
 }
