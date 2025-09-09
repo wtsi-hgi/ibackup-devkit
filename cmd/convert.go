@@ -15,11 +15,14 @@ import (
 	"github.com/wtsi-hgi/ibackup/set"
 )
 
-var ErrWrongTransformer = errors.New("wrong transformer")
-var ErrNoSQLCredentials = errors.New("connection details for MySQL are not set")
-var ErrWrongMetadata = errors.New("wrong metadata value for key")
-var ErrWrongType = errors.New("unknown type")
-var ErrWrongStatus = errors.New("unknown status")
+var (
+	ErrWrongTransformer = errors.New("wrong transformer")
+	ErrNoSQLCredentials = errors.New("connection details for MySQL are not set")
+	ErrWrongMetadata    = errors.New("wrong metadata value for key")
+	ErrWrongType        = errors.New("unknown type")
+	ErrWrongStatus      = errors.New("unknown status")
+	ErrSetNotComplete   = errors.New("set is not complete")
+)
 
 func buildURL(host, port, dbName, user, password string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true", user, password, host, port, dbName)
@@ -58,12 +61,12 @@ var convertCmd = &cobra.Command{
 			return err
 		}
 
-		defer func() {
-			err = boltDB.Close()
-			if err != nil {
-				logger.Error(err.Error())
-			}
-		}()
+		defer callAndLogError(boltDB.Close)
+
+		err = validateSets(sets)
+		if err != nil {
+			return err
+		}
 
 		var sqlDB *db.DB
 
@@ -81,15 +84,15 @@ var convertCmd = &cobra.Command{
 			return err
 		}
 
-		defer func() {
-			err = sqlDB.Close()
-			if err != nil {
-				logger.Error(err.Error())
-			}
-		}()
+		defer callAndLogError(sqlDB.Close)
 
 		for _, s := range sets {
 			logger.Info("Transferring set: %s of %s", s.Name, s.Requester)
+			err = validateSet(s, boltDB)
+			if err != nil {
+				return err
+			}
+
 			err = transferAllDataForSet(boltDB, sqlDB, s)
 			if err != nil {
 				return err
@@ -109,6 +112,37 @@ func init() {
 	}
 
 	RootCmd.AddCommand(convertCmd)
+}
+
+// validateSets validates external set properties
+func validateSets(sets []*set.Set) error {
+	for _, s := range sets {
+		switch s.Status {
+		case set.Complete, set.Failing:
+		default:
+			return fmt.Errorf("%w: %s/%s - %s", ErrSetNotComplete, s.Requester, s.Name, s.Status)
+		}
+	}
+
+	return nil
+}
+
+// validateSet validates internal set properties
+func validateSet(s *set.Set, boltDB *set.DB) error {
+	files, err := boltDB.GetPureFileEntries(s.ID())
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		switch file.Status {
+		case set.Registered, set.Pending, set.UploadingEntry:
+			return fmt.Errorf("%w: %s/%s file %s - %s", ErrSetNotComplete, s.Requester, s.Name, file.Path, file.Status)
+		default:
+		}
+	}
+
+	return nil
 }
 
 func transferAllDataForSet(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
@@ -256,7 +290,7 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 
 	newFiles := make([]*db.File, len(files))
 	for i, file := range files {
-		newFiles[i], err = convertFile(file)
+		newFiles[i], err = convertFile(file, boltDB)
 		if err != nil {
 			return err
 		}
@@ -267,6 +301,10 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 		return err
 	}
 
+	return transferFileStatuses(sqlDB, files)
+}
+
+func transferFileStatuses(sqlDB *db.DB, files []*set.Entry) error {
 	p, err := sqlDB.RegisterProcess()
 	if err != nil {
 		return err
@@ -316,7 +354,7 @@ func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
 
 func noSeq[T any](_ func(T) bool) {}
 
-func convertFile(file *set.Entry) (*db.File, error) {
+func convertFile(file *set.Entry, boltDB *set.DB) (*db.File, error) {
 	newType, err := convertFileType(file.Type)
 	if err != nil {
 		return nil, err
@@ -327,16 +365,33 @@ func convertFile(file *set.Entry) (*db.File, error) {
 		return nil, err
 	}
 
+	mountPoint := boltDB.GetMountPointFromPath(file.Path)
+	if mountPoint == "/" {
+		if strings.HasPrefix(file.Path, "/lustre/scratch123") {
+			mountPoint = "/lustre/scratch123"
+		} else if strings.HasPrefix(file.Path, "/lustre/scratch119") {
+			mountPoint = "/lustre/scratch119"
+		} else {
+			return nil, fmt.Errorf("cannot convert file %s: mount point is root", file.Path)
+		}
+	}
+
 	newFile := &db.File{
-		LocalPath: file.Path,
-		//RemotePath: "",
-		Size:  file.Size,
-		Inode: file.Inode,
-		//MountPount: "",
-		//Btime: 0,
-		//Mtime: 0,
-		Type:   newType,
-		Status: newStatus,
+		//RemotePath: "", // set inside SQL call
+		LocalPath:  file.Path,
+		Size:       file.Size,
+		Inode:      file.Inode,
+		MountPount: mountPoint,
+		Type:       newType,
+		Status:     newStatus,
+		// Btime: 0, no way to obtain
+		// Mtime: 0, no way to obtain
+		// Owner: "", no way to obtain
+		// Group: "", no way to obtain
+	}
+
+	if file.Type == set.Symlink {
+		newFile.SymlinkDest = ""
 	}
 
 	return newFile, nil
@@ -412,3 +467,10 @@ func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
 //		return fmt.Errorf("%w: %d", ErrWrongStatus, sqlSet.Status)
 //	}
 //}
+
+func callAndLogError(f func() error) {
+	err := f()
+	if err != nil {
+		logger.Error(err.Error())
+	}
+}

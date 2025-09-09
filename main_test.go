@@ -45,6 +45,14 @@ import (
 	"github.com/wtsi-hgi/ibackup/set"
 )
 
+const (
+	_      = iota // ignore first value (0)
+	KB int = 1 << (10 * iota)
+	MB
+	GB
+	TB
+)
+
 func TestBolt(t *testing.T) {
 	Convey("You cannot run a tool without --database flag", t, func() {
 		cmd.RootCmd.SetArgs([]string{"bolt"})
@@ -205,80 +213,130 @@ const (
 //	})
 //}
 
-var successfulStatuses = []transfer.RequestStatus{
-	transfer.RequestStatusUploaded, transfer.RequestStatusOrphaned, transfer.RequestStatusReplaced, transfer.RequestStatusUnmodified,
-}
-
 func TestConvert(t *testing.T) {
-	Convey("Given a test bolt database", t, func() {
-		testBoltFile := filepath.Join(t.TempDir(), "test.db")
-		boltDB, err := set.New(testBoltFile, "", false)
+	cmdErrs := new(bytes.Buffer)
+	cmd.RootCmd.SetOut(cmdErrs)
+
+	Convey("Given a test SQL database", t, func() {
+		url, err := cmd.BuildSQLURL()
 		So(err, ShouldBeNil)
 
-		testSets := generateRandomSets(testSetsNum)
-
-		filesMap := make(map[*set.Set][]string)
-
-		for _, s := range testSets {
-			err = boltDB.AddOrUpdate(s)
-			So(err, ShouldBeNil)
-
-			var prefix string
-
-			switch s.Transformer {
-			case "humgen":
-				prefix = "/lustre/scratch123/humgen/projects_v2/"
-			case "gengen":
-				prefix = "/lustre/scratch123/gengen/projects_v2/"
-			default:
-				prefix = "/lustre"
-			}
-
-			setFiles := generateRandomFiles(rand.Intn(maxFilesPerSet), prefix)
-			filesMap[s] = setFiles
-
-			if len(setFiles) > 0 {
-				err = boltDB.MergeFileEntries(s.ID(), setFiles)
-				So(err, ShouldBeNil)
-			}
-
-			setRandomFileStatus(t, boltDB, s, setFiles)
-		}
-
-		err = boltDB.Close()
+		sqlDB, err := db.Init("mysql", url)
 		So(err, ShouldBeNil)
 
-		cmdErrs := new(bytes.Buffer)
-		cmd.RootCmd.SetOut(cmdErrs)
+		defer callAndLogError(t, sqlDB.Close)
 
-		Convey("And a connection to a MySQL database", func() {
-			url, err := cmd.BuildSQLURL()
+		resetDatabase(t)
+
+		Convey("And a connection to a Bolt database", func() {
+			testBoltFile := filepath.Join(t.TempDir(), "test.db")
+			boltDB, err := set.New(testBoltFile, "", false)
 			So(err, ShouldBeNil)
 
-			sqlDB, err := db.Init("mysql", url)
-			So(err, ShouldBeNil)
+			Convey("With a not complete set", func() {
+				testSet := generateRandomSets(1)[0]
+				testSet.Status = randomChoice(set.PendingDiscovery, set.PendingUpload, set.Uploading)
 
-			defer callAndLogError(t, sqlDB.Close)
-
-			resetDatabase(t)
-
-			Convey("You can transfer sets", func() {
-				cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
-
-				err = cmd.RootCmd.Execute()
+				err = boltDB.AddOrUpdate(testSet)
 				So(err, ShouldBeNil)
+
+				err = boltDB.Close()
+				So(err, ShouldBeNil)
+
+				Convey("Transfer will fail", func() {
+					cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
+
+					err = cmd.RootCmd.Execute()
+					So(err, ShouldNotBeNil)
+					So(err.Error(), ShouldContainSubstring, cmd.ErrSetNotComplete.Error())
+				})
+			})
+
+			Convey("With a set with a not complete file", func() {
+				testSet := generateRandomSets(1)[0]
+
+				err = boltDB.AddOrUpdate(testSet)
+				So(err, ShouldBeNil)
+
+				setFiles := generateRandomFiles(1, "/")
+
+				err = boltDB.MergeFileEntries(testSet.ID(), setFiles)
+				So(err, ShouldBeNil)
+
+				entry, err := boltDB.GetFileEntryForSet(testSet.ID(), setFiles[0])
+				So(err, ShouldBeNil)
+
+				entry.Status = set.Pending
+
+				err = boltDB.UpdateEntry(testSet.ID(), setFiles[0], entry)
+				So(err, ShouldBeNil)
+
+				err = boltDB.Close()
+				So(err, ShouldBeNil)
+
+				Convey("Transfer will fail", func() {
+					cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
+
+					err = cmd.RootCmd.Execute()
+					So(err, ShouldNotBeNil)
+					So(err.Error(), ShouldContainSubstring, cmd.ErrSetNotComplete.Error())
+				})
+			})
+
+			Convey("With only complete sets", func() {
+				testSets := generateRandomSets(testSetsNum)
+
+				filesMap := make(map[*set.Set][]string)
 
 				for _, s := range testSets {
-					Convey(fmt.Sprintf("check set %s", s.Name), func() {
-						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+					err = boltDB.AddOrUpdate(s)
+					So(err, ShouldBeNil)
+
+					var prefix string
+
+					scratch := fmt.Sprintf("scratch%d", randomChoice(119, 120, 122, 123, 124, 125, 126, 127))
+
+					switch s.Transformer {
+					case "humgen":
+						prefix = "/lustre/" + scratch + "/humgen/projects_v2/"
+					case "gengen":
+						prefix = "/lustre/" + scratch + "/gengen/projects_v2/"
+					default:
+						prefix = "/lustre/" + scratch
+					}
+
+					setFiles := generateRandomFiles(rand.Intn(maxFilesPerSet), prefix)
+					filesMap[s] = setFiles
+
+					if len(setFiles) > 0 {
+						err = boltDB.MergeFileEntries(s.ID(), setFiles)
 						So(err, ShouldBeNil)
+					}
 
-						checkSetsIdentical(t, s, newSet)
-
-						newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
-						checkFilesIdentical(t, filesMap[s], newFiles)
-					})
+					setRandomFileProperties(t, boltDB, s, setFiles)
 				}
+
+				err = boltDB.Close()
+				So(err, ShouldBeNil)
+
+				Convey("You can transfer sets", func() {
+					cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
+
+					err = cmd.RootCmd.Execute()
+					So(err, ShouldBeNil)
+
+					for _, s := range testSets {
+						Convey(fmt.Sprintf("check set %s", s.Name), func() {
+							newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+							So(err, ShouldBeNil)
+
+							checkSetsIdentical(t, s, newSet)
+
+							newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
+							checkFilesIdentical(t, filesMap[s], newFiles)
+						})
+					}
+				})
 			})
 		})
 	})
@@ -300,7 +358,7 @@ func generateRandomSets(n int) []*set.Set {
 			},
 			ReadOnly: randomChoice(true, false),
 			Hide:     randomChoice(true, false),
-			Status:   randomChoice(set.PendingDiscovery, set.PendingUpload, set.Uploading, set.Failing, set.Complete),
+			Status:   randomChoice(set.Failing, set.Complete),
 		}
 
 		testSets[i] = s
@@ -335,6 +393,8 @@ func resetDatabase(t *testing.T) {
 
 	sqlDB, err := sql.Open("mysql", url)
 	So(err, ShouldBeNil)
+
+	defer callAndLogError(t, sqlDB.Close)
 
 	for _, table := range [...]string{"activeDiscoveries", "queue",
 		"processes", "localFiles", "remoteFiles", "hardlinks", "toDiscover",
@@ -447,37 +507,38 @@ func Difference[T comparable](slice1, slice2 []T) []T {
 	return diff
 }
 
-func setFileStatus(boltDB *set.DB, s *set.Set, path string, status transfer.RequestStatus) error {
-	_, err := boltDB.SetEntryStatus(
-		&transfer.Request{
-			Set:       s.Name,
-			Requester: s.Requester,
-			Local:     path,
-			Status:    status,
-		})
-
-	return err
-}
-
-func setRandomFileStatus(t *testing.T, boltDB *set.DB, s *set.Set, files []string) {
+func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []string) {
 	t.Helper()
 
-	successfulFiles := make([]string, len(files))
-	copy(successfulFiles, files)
-
-	var failingFiles []string
-	if s.Status == set.Failing {
-		failingFiles = randomSubset(files, len(files))
-		successfulFiles = Difference(successfulFiles, failingFiles)
+	entryTypes := []set.EntryType{
+		set.Regular, set.Hardlink, set.Symlink, set.Abnormal, set.Unknown,
 	}
 
-	for _, file := range successfulFiles {
-		err := setFileStatus(boltDB, s, file, randomChoice(successfulStatuses...))
+	entryStatuses := []set.EntryStatus{
+		set.Pending, set.UploadingEntry, set.Uploaded, set.Failed,
+		set.Replaced, set.Skipped, set.Orphaned, set.Registered,
+	}
+
+	for _, file := range files {
+
+		entry, err := boltDB.GetFileEntryForSet(s.ID(), file)
 		So(err, ShouldBeNil)
-	}
 
-	for _, file := range failingFiles {
-		err := setFileStatus(boltDB, s, file, transfer.RequestStatusFailed)
+		entry.Type = randomChoice(entryTypes...)
+
+		switch entry.Type {
+		case set.Abnormal:
+			entry.Status = set.AbnormalEntry
+		case set.Unknown:
+			entry.Status = set.Missing
+		default:
+			entry.Status = randomChoice(entryStatuses...)
+		}
+
+		entry.Size = uint64(rand.Intn(MB))
+		entry.Inode = uint64(rand.Int31())
+
+		err = boltDB.UpdateEntry(s.ID(), file, entry)
 		So(err, ShouldBeNil)
 	}
 }
