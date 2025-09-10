@@ -266,7 +266,7 @@ func TestConvert(t *testing.T) {
 				entry, err := boltDB.GetFileEntryForSet(testSet.ID(), setFiles[0])
 				So(err, ShouldBeNil)
 
-				entry.Status = set.Pending
+				entry.Status = randomChoice(set.Registered, set.Pending, set.UploadingEntry)
 
 				err = boltDB.UpdateEntry(testSet.ID(), setFiles[0], entry)
 				So(err, ShouldBeNil)
@@ -294,7 +294,8 @@ func TestConvert(t *testing.T) {
 
 					var prefix string
 
-					scratch := fmt.Sprintf("scratch%d", randomChoice(119, 120, 122, 123, 124, 125, 126, 127))
+					scratchNumbers := []int{119, 120, 122, 123, 124, 125, 126, 127}
+					scratch := fmt.Sprintf("scratch%d", randomChoice(scratchNumbers...))
 
 					switch s.Transformer {
 					case "humgen":
@@ -515,8 +516,7 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 	}
 
 	entryStatuses := []set.EntryStatus{
-		set.Pending, set.UploadingEntry, set.Uploaded, set.Failed,
-		set.Replaced, set.Skipped, set.Orphaned, set.Registered,
+		set.Uploaded, set.Failed, set.Replaced, set.Skipped, set.Orphaned,
 	}
 
 	for _, file := range files {

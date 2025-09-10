@@ -85,6 +85,7 @@ var convertCmd = &cobra.Command{
 		}
 
 		defer callAndLogError(sqlDB.Close)
+		defer callAndLogError(sqlDB.RemoveStaleProcesses)
 
 		for _, s := range sets {
 			logger.Info("Transferring set: %s of %s", s.Name, s.Requester)
@@ -329,7 +330,15 @@ func transferFileStatuses(sqlDB *db.DB, files []*set.Entry) error {
 			if err != nil {
 				return err
 			}
-		case set.Uploaded, set.Replaced, set.Skipped, set.Orphaned:
+		case set.Skipped:
+			task.Skipped = true
+			err = sqlDB.TaskComplete(task)
+			if err != nil {
+				return err
+			}
+			// orphaned: add as normal, then add as missing
+			// replaced: add with wrong mtime, then add with correct mtime
+		case set.Uploaded, set.Replaced, set.Orphaned, set.AbnormalEntry:
 			err = sqlDB.TaskComplete(task)
 			if err != nil {
 				return err
@@ -424,10 +433,6 @@ func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
 	var newStatus db.FileStatus
 
 	switch status {
-	case set.Pending:
-		newStatus = db.StatusNone
-	case set.UploadingEntry:
-		newStatus = db.StatusNone
 	case set.Uploaded:
 		newStatus = db.StatusUploaded
 	case set.Failed:
@@ -442,8 +447,6 @@ func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
 		newStatus = db.StatusSkipped
 	case set.Orphaned:
 		newStatus = db.StatusOrphaned
-	case set.Registered:
-		newStatus = db.StatusNone
 	default:
 		return newStatus, fmt.Errorf("%w: %d", ErrWrongStatus, status)
 	}
