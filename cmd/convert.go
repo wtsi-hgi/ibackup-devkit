@@ -24,6 +24,7 @@ var (
 	ErrWrongType        = errors.New("unknown type")
 	ErrWrongStatus      = errors.New("unknown status")
 	ErrSetNotComplete   = errors.New("set is not complete")
+	ErrEmptySet         = errors.New("set is empty")
 	ErrWrongReason      = errors.New("unknown reason")
 )
 
@@ -94,6 +95,12 @@ var convertCmd = &cobra.Command{
 			logger.Info("Transferring set: %s of %s", s.Name, s.Requester)
 			err = validateSet(s, boltDB)
 			if err != nil {
+				if errors.Is(err, ErrEmptySet) {
+					logger.Warn("%w - set will not be transferred", err)
+
+					continue
+				}
+
 				return err
 			}
 
@@ -134,6 +141,10 @@ func validateSet(s *set.Set, boltDB *set.DB) error {
 	files, err := boltDB.GetPureFileEntries(s.ID())
 	if err != nil {
 		return err
+	}
+
+	if s.NumFiles == 0 && len(files) == 0 {
+		return fmt.Errorf("%w: %s/%s", ErrEmptySet, s.Requester, s.Name)
 	}
 
 	for _, file := range files {
@@ -196,7 +207,7 @@ func convertSet(boltSet *set.Set) (*db.Set, error) {
 		return nil, err
 	}
 
-	sqlSet.MonitorTime = boltSet.MonitorTime
+	sqlSet.MonitorTime = boltSet.MonitorTime / time.Second
 	sqlSet.MonitorRemovals = boltSet.MonitorRemovals
 	sqlSet.Description = boltSet.Description
 	sqlSet.DeleteLocal = boltSet.DeleteLocal
@@ -293,6 +304,8 @@ func convertReason(reason string) (db.Reason, error) {
 	return value, nil
 }
 
+// I need a 2-staged transfer. First I partially transfer not-complete files (replaced, orphaned),
+// then I transfer all files
 func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 	files, err := boltDB.GetPureFileEntries(s.ID())
 	if err != nil {
@@ -309,6 +322,8 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 	replacedFiles := make([]*db.File, 0, len(files))
 	failedFiles := make([]*db.File, 0, len(files))
 
+	correctMTimes := make(map[string]int64)
+
 	for _, file := range files {
 		newFile, err := convertFile(file, boltDB)
 		if err != nil {
@@ -317,8 +332,11 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 
 		switch file.Status {
 		case set.Orphaned:
+			newFile.Status = db.StatusUploaded
 			orphanedFiles = append(orphanedFiles, newFile)
 		case set.Replaced:
+			correctMTimes[newFile.LocalPath] = newFile.Mtime
+			newFile.Mtime = -1
 			replacedFiles = append(replacedFiles, newFile)
 		case set.Failed:
 			failedFiles = append(failedFiles, newFile)
@@ -326,33 +344,38 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 			normalFiles = append(normalFiles, newFile)
 		}
 
+		d := db.Discover{
+			Path: newFile.LocalPath,
+			Type: db.DiscoverFile,
+		}
+
+		err = sqlDB.AddSetDiscovery(newSet, &d)
+		if err != nil {
+			return err
+		}
 	}
-
-	//sqlDB.AddSetDiscovery() -- call this to record pure files
-
-	//TODO skipped reset after I call transferNormalFiles
 
 	p, err := sqlDB.RegisterProcess()
 	if err != nil {
 		return err
 	}
 
-	err = transferNormalFiles(p, newSet, normalFiles, files, sqlDB)
+	notCompleteFiles := slices.Concat(replacedFiles, orphanedFiles)
+	err = uploadFiles(p, newSet, notCompleteFiles, files, sqlDB)
 	if err != nil {
 		return err
 	}
 
-	err = transferOrphanedFiles(p, newSet, orphanedFiles, files, sqlDB)
-	if err != nil {
-		return err
+	for _, file := range orphanedFiles {
+		file.Status = db.StatusMissing
 	}
 
-	err = transferReplacedFiles(p, newSet, replacedFiles, files, sqlDB)
-	if err != nil {
-		return err
+	for _, file := range replacedFiles {
+		file.Mtime = correctMTimes[file.LocalPath]
 	}
 
-	err = transferFailedFiles(p, newSet, failedFiles, files, sqlDB)
+	allFiles := slices.Concat(normalFiles, notCompleteFiles, failedFiles)
+	err = uploadFiles(p, newSet, allFiles, files, sqlDB)
 	if err != nil {
 		return err
 	}
@@ -360,13 +383,24 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 	return nil
 }
 
-func transferNormalFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+func uploadFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	if len(newFiles) == 0 {
+		return nil
+	}
+
 	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
 	if err != nil {
 		return err
 	}
 
-	return transferFileStatuses(p, sqlDB, oldFiles)
+	for range maxAttempts {
+		err = transferFileStatuses(p, sqlDB, oldFiles)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error {
@@ -397,44 +431,6 @@ func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error
 	}
 
 	return err
-}
-
-// orphaned: add as normal, then add as missing
-func transferOrphanedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
-	for _, file := range newFiles {
-		file.Status = db.StatusUploaded
-	}
-
-	err := transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range newFiles {
-		file.Status = db.StatusMissing
-	}
-
-	return transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
-}
-
-// replaced: add with a wrong mtime, then add with correct mtime
-func transferReplacedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
-	correctMTimes := make(map[string]int64, len(newFiles))
-	for _, file := range newFiles {
-		correctMTimes[file.LocalPath] = file.Mtime
-		file.Mtime = -1
-	}
-
-	err := transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
-	if err != nil {
-		return err
-	}
-
-	for _, file := range newFiles {
-		file.Mtime = correctMTimes[file.LocalPath]
-	}
-
-	return transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
 }
 
 func transferFailedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {

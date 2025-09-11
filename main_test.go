@@ -163,56 +163,6 @@ const (
 	maxFilesPerSet = 5
 )
 
-//func TestConvert(t *testing.T) {
-//	cmdErrs := new(bytes.Buffer)
-//	cmd.RootCmd.SetOut(cmdErrs)
-//
-//	Convey("Given an empty MySQL database", t, func() {
-//		url, err := cmd.BuildSQLURL()
-//		So(err, ShouldBeNil)
-//
-//		resetDatabase(t)
-//
-//		sqlDB, err := db.Init("mysql", url)
-//		So(err, ShouldBeNil)
-//
-//		defer callAndLogError(t, sqlDB.Close)
-//
-//		Convey("And an empty Bolt database", func() {
-//			testBoltFile := filepath.Join(t.TempDir(), "test.db")
-//			boltDB, err := set.New(testBoltFile, "", false)
-//			So(err, ShouldBeNil)
-//
-//			Convey("You can transfer empty sets", func() {
-//				testSets := generateRandomSets(testSetsNum)
-//				for _, s := range testSets {
-//					s.Status = set.Complete
-//
-//					err = boltDB.AddOrUpdate(s)
-//					So(err, ShouldBeNil)
-//				}
-//
-//				err = boltDB.Close()
-//				So(err, ShouldBeNil)
-//
-//				cmd.RootCmd.SetArgs([]string{"convert", "--bolt", testBoltFile})
-//
-//				err = cmd.RootCmd.Execute()
-//				So(err, ShouldBeNil)
-//
-//				for _, s := range testSets {
-//					Convey(fmt.Sprintf("check set %s", s.Name), func() {
-//						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
-//						So(err, ShouldBeNil)
-//
-//						checkSetsIdentical(t, s, newSet)
-//					})
-//				}
-//			})
-//		})
-//	})
-//}
-
 func TestConvert(t *testing.T) {
 	cmdErrs := new(bytes.Buffer)
 	cmd.RootCmd.SetOut(cmdErrs)
@@ -286,9 +236,12 @@ func TestConvert(t *testing.T) {
 			Convey("With only complete sets", func() {
 				testSets := generateRandomSets(testSetsNum)
 
-				filesMap := make(map[*set.Set][]string)
+				filesMap := make(map[*set.Set][]*set.Entry)
 
-				for _, s := range testSets {
+				for i, s := range testSets {
+					isReadOnly := s.ReadOnly
+					s.ReadOnly = false
+
 					err = boltDB.AddOrUpdate(s)
 					So(err, ShouldBeNil)
 
@@ -307,15 +260,19 @@ func TestConvert(t *testing.T) {
 					}
 
 					setFiles := generateRandomFiles(rand.Intn(maxFilesPerSet), prefix)
-					filesMap[s] = setFiles
 
 					if len(setFiles) > 0 {
 						err = boltDB.MergeFileEntries(s.ID(), setFiles)
 						So(err, ShouldBeNil)
 					}
 
-					setRandomFileProperties(t, boltDB, s, setFiles)
+					entries := setRandomFileProperties(t, boltDB, s, setFiles)
+					testSets[i] = updateSetProperties(t, boltDB, s, isReadOnly, entries)
+
+					filesMap[s] = entries
 				}
+
+				printTestSetup(filesMap)
 
 				err = boltDB.Close()
 				So(err, ShouldBeNil)
@@ -328,6 +285,15 @@ func TestConvert(t *testing.T) {
 
 					for _, s := range testSets {
 						t.Logf("\ncheck set %s", s.Name)
+
+						if len(filesMap[s]) == 0 {
+							_, err = sqlDB.GetSet(s.Name, s.Requester)
+							So(err, ShouldNotBeNil)
+							So(err.Error(), ShouldContainSubstring, "set not found")
+
+							continue
+						}
+
 						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
 						So(err, ShouldBeNil)
 
@@ -356,9 +322,12 @@ func generateRandomSets(n int) []*set.Set {
 				transfer.MetaKeyReview:  randomDate(),
 				transfer.MetaKeyRemoval: randomDate(),
 			},
-			ReadOnly: randomChoice(true, false),
-			Hide:     randomChoice(true, false),
-			Status:   set.Complete,
+			ReadOnly:        randomChoice(true, false),
+			Hide:            randomChoice(true, false),
+			Status:          set.Complete,
+			MonitorTime:     randomDuration(),
+			MonitorRemovals: randomChoice(true, false),
+			Description:     randomString(),
 		}
 
 		testSets[i] = s
@@ -383,6 +352,26 @@ func randomSubset[T comparable](options []T, n int) []T {
 
 func randomDate() string {
 	return time.Now().AddDate(0, 0, rand.Intn(360)).Format(time.RFC3339)
+}
+
+func randomDuration() time.Duration {
+	return time.Duration(rand.Intn(30)) * 24 * time.Hour
+}
+
+func randomString() string {
+	const (
+		maxLength = 10
+		charset   = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	)
+
+	length := rand.Intn(maxLength)
+
+	result := make([]byte, length)
+	for i := range length {
+		result[i] = charset[rand.Intn(len(charset))]
+	}
+
+	return string(result)
 }
 
 func resetDatabase(t *testing.T) {
@@ -412,26 +401,45 @@ func checkSetsIdentical(t *testing.T, s1 *set.Set, s2 *db.Set) {
 	delete(meta, transfer.MetaKeyReview)
 	delete(meta, transfer.MetaKeyRemoval)
 
+	// check set properties
 	So(s2.Name, ShouldEqual, s1.Name)
 	So(s2.Requester, ShouldEqual, s1.Requester)
-	So(s2.MonitorTime, ShouldEqual, s1.MonitorTime)
+	So(s2.MonitorTime, ShouldEqual, s1.MonitorTime/time.Second)
 	So(s2.MonitorRemovals, ShouldEqual, s1.MonitorRemovals)
 	So(s2.Description, ShouldEqual, s1.Description)
 	So(map[string]string(s2.Metadata), ShouldResemble, meta)
 	So(s2.DeleteLocal, ShouldEqual, s1.DeleteLocal)
-	So(s2.StartedDiscovery, ShouldEqual, s1.StartedDiscovery)
-	//So(s2.LastDiscovery, ShouldEqual, s1.LastDiscovery)
+	So(s2.Hidden, ShouldEqual, s1.Hide)
 	So(s2.Status, ShouldEqual, db.Status(s1.Status))
+
+	// check file counts
+	So(s2.NumFiles, ShouldEqual, s1.NumFiles)
+	So(s2.Uploaded, ShouldEqual, s1.Uploaded)
+	So(s2.Skipped, ShouldEqual, s1.Skipped)
+	So(s2.Replaced, ShouldEqual, s1.Replaced)
+	So(s2.Missing, ShouldEqual, s1.Missing)
+	So(s2.Orphaned, ShouldEqual, s1.Orphaned)
+	So(s2.Abnormal, ShouldEqual, s1.Abnormal)
+	So(s2.Failed, ShouldEqual, s1.Failed)
+
+	// check discovery attributes
+	//So(s2.StartedDiscovery, ShouldEqual, s1.StartedDiscovery)
+	//So(s2.LastDiscovery, ShouldEqual, s1.LastDiscovery)
+
+	// check completion attributes
 	//So(s2.LastCompleted, ShouldEqual, s1.LastCompleted)
-	So(s2.LastCompletedCount, ShouldEqual, s1.LastCompletedCount)
-	So(s2.LastCompletedSize, ShouldEqual, s1.LastCompletedSize)
-	So(s2.SizeUploaded, ShouldEqual, s1.SizeUploaded)
+	//So(s2.LastCompletedCount, ShouldEqual, s1.LastCompletedCount)
+	//So(s2.LastCompletedSize, ShouldEqual, s1.LastCompletedSize)
+	//So(s2.SizeUploaded, ShouldEqual, s1.SizeUploaded)
+
+	// check removal properties
 	So(s2.SizeRemoved, ShouldEqual, s1.SizeRemoved)
 	So(s2.NumObjectsToBeRemoved, ShouldEqual, s1.NumObjectsToBeRemoved)
 	So(s2.NumObjectsRemoved, ShouldEqual, s1.NumObjectsRemoved)
+
+	// check errors
 	So(s2.Error, ShouldEqual, s1.Error)
 	So(s2.Warning, ShouldEqual, s1.Warning)
-	So(s2.Hidden, ShouldEqual, s1.Hide)
 }
 
 func generateRandomFiles(n int, prefix string) []string {
@@ -446,13 +454,85 @@ func generateRandomFiles(n int, prefix string) []string {
 	return files
 }
 
-func checkFilesIdentical(t *testing.T, files1 []string, files2 []*db.File) {
+func checkFilesIdentical(t *testing.T, files1 []*set.Entry, files2 []*db.File) {
 	t.Helper()
 
 	So(files2, ShouldHaveLength, len(files1))
 
+	fileMap1 := make(map[string]*set.Entry, len(files1))
+	for _, file := range files1 {
+		fileMap1[file.Path] = file
+	}
+
+	fileMap2 := make(map[string]*db.File, len(files2))
 	for _, file := range files2 {
-		So(files1, ShouldContain, file.LocalPath)
+		fileMap2[file.LocalPath] = file
+	}
+
+	for _, file := range files2 {
+		fileMatch, ok := fileMap1[file.LocalPath]
+		So(ok, ShouldBeTrue)
+
+		So(file.LocalPath, ShouldEqual, fileMatch.Path)
+		So(file.Size, ShouldEqual, fileMatch.Size)
+		So(file.Inode, ShouldEqual, fileMatch.Inode)
+		So(FileTypeToString(file.Type), ShouldEqual, EntryTypeToString(fileMatch.Type))
+		So(FileStatusToString(file.Status), ShouldEqual, fileMatch.Status.String())
+	}
+}
+
+func FileStatusToString(status db.FileStatus) string {
+	switch status {
+	case db.StatusMissing:
+		return "missing"
+	case db.StatusOrphaned:
+		return "orphaned"
+	case db.StatusUploaded:
+		return "uploading"
+	case db.StatusReplaced:
+		return "replaced"
+	case db.StatusSkipped:
+		return "skipped"
+	default:
+		return ""
+	}
+}
+
+func EntryTypeToString(status set.EntryType) string {
+	switch status {
+	case set.Regular:
+		return "regular"
+	case set.Hardlink:
+		return "hardlink"
+	case set.Symlink:
+		return "symlink"
+	case set.Abnormal:
+		return "abnormal"
+	case set.Directory:
+		return "directory"
+	case set.Unknown:
+		return "unknown"
+	default:
+		return ""
+	}
+}
+
+func FileTypeToString(status db.FileType) string {
+	switch status {
+	case db.Regular:
+		return "regular"
+	case db.Hardlink:
+		return "hardlink"
+	case db.Symlink:
+		return "symlink"
+	case db.Abnormal:
+		return "abnormal"
+	case db.Unknown:
+		return "unknown"
+	case db.Directory:
+		return "directory"
+	default:
+		return ""
 	}
 }
 
@@ -507,7 +587,7 @@ func Difference[T comparable](slice1, slice2 []T) []T {
 	return diff
 }
 
-func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []string) {
+func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []string) []*set.Entry {
 	t.Helper()
 
 	entryTypes := []set.EntryType{
@@ -518,9 +598,25 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 		set.Uploaded, set.Failed, set.Replaced, set.Skipped, set.Orphaned,
 	}
 
-	for _, file := range files {
+	entries := make([]*set.Entry, len(files))
+
+	for i, file := range files {
 
 		entry, err := boltDB.GetFileEntryForSet(s.ID(), file)
+		So(err, ShouldBeNil)
+
+		entry.Status = set.Pending
+
+		err = boltDB.UpdateEntry(s.ID(), file, entry)
+		So(err, ShouldBeNil)
+
+		request := &transfer.Request{
+			Local:     entry.Path,
+			Requester: s.Requester,
+			Set:       s.Name,
+		}
+
+		entry, err = boltDB.SetEntryStatus(request)
 		So(err, ShouldBeNil)
 
 		entry.Type = randomChoice(entryTypes...)
@@ -534,12 +630,42 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 			entry.Status = randomChoice(entryStatuses...)
 		}
 
-		entry.Status = set.Skipped
-
 		entry.Size = uint64(rand.Intn(GB))
 		entry.Inode = uint64(rand.Int31())
 
 		err = boltDB.UpdateEntry(s.ID(), file, entry)
 		So(err, ShouldBeNil)
+
+		entries[i] = entry
+	}
+
+	return entries
+}
+
+func updateSetProperties(t *testing.T, boltDB *set.DB, s *set.Set, isReadOnly bool, entries []*set.Entry) *set.Set {
+	t.Helper()
+
+	for _, entry := range entries {
+		s.NumFiles++
+
+		err := s.UpdateBasedOnEntry(entry, boltDB.GetFileEntries)
+		So(err, ShouldBeNil)
+	}
+
+	s.ReadOnly = isReadOnly
+
+	err := boltDB.AddOrUpdate(s)
+	So(err, ShouldBeNil)
+
+	return s
+}
+
+func printTestSetup(filesMap map[*set.Set][]*set.Entry) {
+	fmt.Println("\n\ntest setup:")
+	for s, files := range filesMap {
+		fmt.Printf("set %s\n", s.Name)
+		for _, file := range files {
+			fmt.Printf("  %s - %s\n", file.Path, file.Status)
+		}
 	}
 }
