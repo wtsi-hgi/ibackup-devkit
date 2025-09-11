@@ -218,6 +218,8 @@ func TestConvert(t *testing.T) {
 	cmd.RootCmd.SetOut(cmdErrs)
 
 	Convey("Given a test SQL database", t, func() {
+		resetDatabase(t)
+
 		url, err := cmd.BuildSQLURL()
 		So(err, ShouldBeNil)
 
@@ -226,8 +228,6 @@ func TestConvert(t *testing.T) {
 
 		defer callAndLogError(t, sqlDB.Close)
 
-		resetDatabase(t)
-
 		Convey("And a connection to a Bolt database", func() {
 			testBoltFile := filepath.Join(t.TempDir(), "test.db")
 			boltDB, err := set.New(testBoltFile, "", false)
@@ -235,7 +235,7 @@ func TestConvert(t *testing.T) {
 
 			Convey("With a not complete set", func() {
 				testSet := generateRandomSets(1)[0]
-				testSet.Status = randomChoice(set.PendingDiscovery, set.PendingUpload, set.Uploading)
+				testSet.Status = randomChoice(set.PendingDiscovery, set.PendingUpload, set.Uploading, set.Failing)
 
 				err = boltDB.AddOrUpdate(testSet)
 				So(err, ShouldBeNil)
@@ -327,15 +327,14 @@ func TestConvert(t *testing.T) {
 					So(err, ShouldBeNil)
 
 					for _, s := range testSets {
-						Convey(fmt.Sprintf("check set %s", s.Name), func() {
-							newSet, err := sqlDB.GetSet(s.Name, s.Requester)
-							So(err, ShouldBeNil)
+						t.Logf("\ncheck set %s", s.Name)
+						newSet, err := sqlDB.GetSet(s.Name, s.Requester)
+						So(err, ShouldBeNil)
 
-							checkSetsIdentical(t, s, newSet)
+						checkSetsIdentical(t, s, newSet)
 
-							newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
-							checkFilesIdentical(t, filesMap[s], newFiles)
-						})
+						newFiles := collectIter(t, sqlDB.GetSetFiles(newSet))
+						checkFilesIdentical(t, filesMap[s], newFiles)
 					}
 				})
 			})
@@ -359,7 +358,7 @@ func generateRandomSets(n int) []*set.Set {
 			},
 			ReadOnly: randomChoice(true, false),
 			Hide:     randomChoice(true, false),
-			Status:   randomChoice(set.Failing, set.Complete),
+			Status:   set.Complete,
 		}
 
 		testSets[i] = s
@@ -397,7 +396,7 @@ func resetDatabase(t *testing.T) {
 
 	defer callAndLogError(t, sqlDB.Close)
 
-	for _, table := range [...]string{"activeDiscoveries", "queue",
+	for _, table := range [...]string{"changedInodes", "activeDiscoveries", "queue",
 		"processes", "localFiles", "remoteFiles", "hardlinks", "toDiscover",
 		"sets", "transformers"} {
 		_, err = sqlDB.Exec("DROP TABLE IF EXISTS `" + table + "`;")
@@ -535,7 +534,9 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 			entry.Status = randomChoice(entryStatuses...)
 		}
 
-		entry.Size = uint64(rand.Intn(MB))
+		entry.Status = set.Skipped
+
+		entry.Size = uint64(rand.Intn(GB))
 		entry.Inode = uint64(rand.Int31())
 
 		err = boltDB.UpdateEntry(s.ID(), file, entry)

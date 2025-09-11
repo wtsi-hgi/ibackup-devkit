@@ -15,6 +15,8 @@ import (
 	"github.com/wtsi-hgi/ibackup/set"
 )
 
+const maxAttempts = 3
+
 var (
 	ErrWrongTransformer = errors.New("wrong transformer")
 	ErrNoSQLCredentials = errors.New("connection details for MySQL are not set")
@@ -22,6 +24,7 @@ var (
 	ErrWrongType        = errors.New("unknown type")
 	ErrWrongStatus      = errors.New("unknown status")
 	ErrSetNotComplete   = errors.New("set is not complete")
+	ErrWrongReason      = errors.New("unknown reason")
 )
 
 func buildURL(host, port, dbName, user, password string) string {
@@ -118,9 +121,7 @@ func init() {
 // validateSets validates external set properties
 func validateSets(sets []*set.Set) error {
 	for _, s := range sets {
-		switch s.Status {
-		case set.Complete, set.Failing:
-		default:
+		if s.Status != set.Complete {
 			return fmt.Errorf("%w: %s/%s - %s", ErrSetNotComplete, s.Requester, s.Name, s.Status)
 		}
 	}
@@ -210,13 +211,10 @@ func convertSet(boltSet *set.Set) (*db.Set, error) {
 	//sqlSet.NumObjectsToBeRemoved = boltSet.NumObjectsToBeRemoved
 	//sqlSet.NumObjectsRemoved = boltSet.NumObjectsRemoved
 
-	var reason db.Reason
-	err = reason.Set(boltSet.Metadata[transfer.MetaKeyReason])
+	sqlSet.Reason, err = convertReason(boltSet.Metadata[transfer.MetaKeyReason])
 	if err != nil {
 		return nil, err
 	}
-
-	sqlSet.Reason = reason
 
 	review, err := time.Parse(time.RFC3339, boltSet.Metadata[transfer.MetaKeyReview])
 	if err != nil {
@@ -278,6 +276,23 @@ func convertTransformer(transformer string) (*db.Transformer, error) {
 	return db.NewTransformer(name, match, replace)
 }
 
+func convertReason(reason string) (db.Reason, error) {
+	var value db.Reason
+
+	switch reason {
+	case db.Backup.String():
+		value = db.Backup
+	case db.Archive.String():
+		value = db.Archive
+	case db.Quarantine.String():
+		value = db.Quarantine
+	default:
+		return value, fmt.Errorf("%w: %s", ErrWrongReason, reason)
+	}
+
+	return value, nil
+}
+
 func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 	files, err := boltDB.GetPureFileEntries(s.ID())
 	if err != nil {
@@ -289,32 +304,76 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 		return err
 	}
 
-	newFiles := make([]*db.File, len(files))
-	for i, file := range files {
-		newFiles[i], err = convertFile(file, boltDB)
+	normalFiles := make([]*db.File, 0, len(files))
+	orphanedFiles := make([]*db.File, 0, len(files))
+	replacedFiles := make([]*db.File, 0, len(files))
+	failedFiles := make([]*db.File, 0, len(files))
+
+	for _, file := range files {
+		newFile, err := convertFile(file, boltDB)
 		if err != nil {
 			return err
 		}
+
+		switch file.Status {
+		case set.Orphaned:
+			orphanedFiles = append(orphanedFiles, newFile)
+		case set.Replaced:
+			replacedFiles = append(replacedFiles, newFile)
+		case set.Failed:
+			failedFiles = append(failedFiles, newFile)
+		default:
+			normalFiles = append(normalFiles, newFile)
+		}
+
 	}
 
-	err = sqlDB.CompleteDiscovery(newSet, slices.Values(newFiles), noSeq[*db.File])
-	if err != nil {
-		return err
-	}
+	//sqlDB.AddSetDiscovery() -- call this to record pure files
 
-	return transferFileStatuses(sqlDB, files)
-}
+	//TODO skipped reset after I call transferNormalFiles
 
-func transferFileStatuses(sqlDB *db.DB, files []*set.Entry) error {
 	p, err := sqlDB.RegisterProcess()
 	if err != nil {
 		return err
 	}
 
+	err = transferNormalFiles(p, newSet, normalFiles, files, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	err = transferOrphanedFiles(p, newSet, orphanedFiles, files, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	err = transferReplacedFiles(p, newSet, replacedFiles, files, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	err = transferFailedFiles(p, newSet, failedFiles, files, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func transferNormalFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
+	if err != nil {
+		return err
+	}
+
+	return transferFileStatuses(p, sqlDB, oldFiles)
+}
+
+func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error {
 	itErr := sqlDB.ReserveTasks(p, len(files))
 
 	var tasks []*db.Task
-	err = itErr.ForEach(func(task *db.Task) error {
+	err := itErr.ForEach(func(task *db.Task) error {
 		tasks = append(tasks, task)
 		return nil
 	})
@@ -327,24 +386,67 @@ func transferFileStatuses(sqlDB *db.DB, files []*set.Entry) error {
 		switch file.Status {
 		case set.Failed:
 			err = sqlDB.TaskFailed(task)
-			if err != nil {
-				return err
-			}
 		case set.Skipped:
 			task.Skipped = true
 			err = sqlDB.TaskComplete(task)
-			if err != nil {
-				return err
-			}
-			// orphaned: add as normal, then add as missing
-			// replaced: add with wrong mtime, then add with correct mtime
 		case set.Uploaded, set.Replaced, set.Orphaned, set.AbnormalEntry:
 			err = sqlDB.TaskComplete(task)
-			if err != nil {
-				return err
-			}
 		default:
-			log.Printf("Cannot handle file %s with status %s", file.Path, file.Status)
+			err = fmt.Errorf("%w: Cannot handle file %s with status %s", ErrWrongStatus, file.Path, file.Status)
+		}
+	}
+
+	return err
+}
+
+// orphaned: add as normal, then add as missing
+func transferOrphanedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	for _, file := range newFiles {
+		file.Status = db.StatusUploaded
+	}
+
+	err := transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range newFiles {
+		file.Status = db.StatusMissing
+	}
+
+	return transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
+}
+
+// replaced: add with a wrong mtime, then add with correct mtime
+func transferReplacedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	correctMTimes := make(map[string]int64, len(newFiles))
+	for _, file := range newFiles {
+		correctMTimes[file.LocalPath] = file.Mtime
+		file.Mtime = -1
+	}
+
+	err := transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
+	if err != nil {
+		return err
+	}
+
+	for _, file := range newFiles {
+		file.Mtime = correctMTimes[file.LocalPath]
+	}
+
+	return transferNormalFiles(p, s, newFiles, oldFiles, sqlDB)
+}
+
+func transferFailedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
+	if err != nil {
+		return err
+	}
+
+	for range maxAttempts {
+		err = transferFileStatuses(p, sqlDB, oldFiles)
+		if err != nil {
+			return err
 		}
 	}
 
