@@ -114,6 +114,13 @@ var convertCmd = &cobra.Command{
 	},
 }
 
+func callAndLogError(f func() error) {
+	err := f()
+	if err != nil {
+		logger.Error(err.Error())
+	}
+}
+
 func init() {
 	convertCmd.Flags().String("bolt", "", "path to the Bolt database file")
 	convertCmd.Flags().String("sqlite", "", "path to the SQLite database file")
@@ -270,6 +277,10 @@ func convertTransformer(transformer string) (*db.Transformer, error) {
 		name = "gengen"
 		match = regexp
 		replace = "/humgen/gengen/$3/$5/$1$4/"
+	case "otar":
+		name = "otar"
+		match = regexp
+		replace = "/humgen/otar/$3/$5/$1$4/"
 	default:
 		name = transformer
 
@@ -383,72 +394,6 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 	return nil
 }
 
-func uploadFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
-	if len(newFiles) == 0 {
-		return nil
-	}
-
-	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
-	if err != nil {
-		return err
-	}
-
-	for range maxAttempts {
-		err = transferFileStatuses(p, sqlDB, oldFiles)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error {
-	itErr := sqlDB.ReserveTasks(p, len(files))
-
-	var tasks []*db.Task
-	err := itErr.ForEach(func(task *db.Task) error {
-		tasks = append(tasks, task)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, task := range tasks {
-		file := matchFile(task, files)
-		if file == nil {
-			return fmt.Errorf("unknown task: %+v", task)
-		}
-
-		switch file.Status {
-		case set.Failed:
-			err = sqlDB.TaskFailed(task)
-		case set.Skipped:
-			task.Skipped = true
-			err = sqlDB.TaskComplete(task)
-		case set.Uploaded, set.Replaced, set.Orphaned, set.AbnormalEntry:
-			err = sqlDB.TaskComplete(task)
-		default:
-			err = fmt.Errorf("%w: Cannot handle file %s with status %s", ErrWrongStatus, file.Path, file.Status)
-		}
-	}
-
-	return err
-}
-
-func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
-	for _, file := range files {
-		if file.Path == task.LocalPath {
-			return file
-		}
-	}
-
-	return nil
-}
-
-func noSeq[T any](_ func(T) bool) {}
-
 func convertFile(file *set.Entry, boltDB *set.DB) (*db.File, error) {
 	newType, err := convertFileType(file.Type)
 	if err != nil {
@@ -540,26 +485,68 @@ func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
 	return newStatus, nil
 }
 
-//func handleSetStatus(sqlDB *db.DB, sqlSet *db.Set) error {
-//	switch sqlSet.Status {
-//	case db.PendingDiscovery:
-//		return nil
-//	case db.PendingUpload:
-//		return nil
-//	case db.Uploading:
-//		return nil
-//	case db.Failing:
-//		return nil
-//	case db.Complete:
-//		return sqlDB.CompleteDiscovery(sqlSet)
-//	default:
-//		return fmt.Errorf("%w: %d", ErrWrongStatus, sqlSet.Status)
-//	}
-//}
-
-func callAndLogError(f func() error) {
-	err := f()
-	if err != nil {
-		logger.Error(err.Error())
+func uploadFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
+	if len(newFiles) == 0 {
+		return nil
 	}
+
+	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
+	if err != nil {
+		return err
+	}
+
+	for range maxAttempts {
+		err = transferFileStatuses(p, sqlDB, oldFiles)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func noSeq[T any](_ func(T) bool) {}
+
+func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error {
+	itErr := sqlDB.ReserveTasks(p, len(files))
+
+	var tasks []*db.Task
+	err := itErr.ForEach(func(task *db.Task) error {
+		tasks = append(tasks, task)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	for _, task := range tasks {
+		file := matchFile(task, files)
+		if file == nil {
+			return fmt.Errorf("unknown task: %+v", task)
+		}
+
+		switch file.Status {
+		case set.Failed:
+			err = sqlDB.TaskFailed(task)
+		case set.Skipped:
+			task.Skipped = true
+			err = sqlDB.TaskComplete(task)
+		case set.Uploaded, set.Replaced, set.Orphaned, set.AbnormalEntry:
+			err = sqlDB.TaskComplete(task)
+		default:
+			err = fmt.Errorf("%w: Cannot handle file %s with status %s", ErrWrongStatus, file.Path, file.Status)
+		}
+	}
+
+	return err
+}
+
+func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
+	for _, file := range files {
+		if file.Path == task.LocalPath {
+			return file
+		}
+	}
+
+	return nil
 }

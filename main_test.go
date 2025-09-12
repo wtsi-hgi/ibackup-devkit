@@ -176,7 +176,9 @@ func TestConvert(t *testing.T) {
 		sqlDB, err := db.Init("mysql", url)
 		So(err, ShouldBeNil)
 
-		defer callAndLogError(t, sqlDB.Close)
+		t.Cleanup(func() {
+			callAndLogError(t, sqlDB.Close)
+		})
 
 		Convey("And a connection to a Bolt database", func() {
 			testBoltFile := filepath.Join(t.TempDir(), "test.db")
@@ -379,7 +381,9 @@ func resetDatabase(t *testing.T) {
 	sqlDB, err := sql.Open("mysql", url)
 	So(err, ShouldBeNil)
 
-	defer callAndLogError(t, sqlDB.Close)
+	t.Cleanup(func() {
+		callAndLogError(t, sqlDB.Close)
+	})
 
 	for _, table := range [...]string{"changedInodes", "activeDiscoveries", "queue",
 		"processes", "localFiles", "remoteFiles", "hardlinks", "toDiscover",
