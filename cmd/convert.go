@@ -77,12 +77,12 @@ var convertCmd = &cobra.Command{
 		if sqlitePath != "" {
 			sqlDB, err = db.Init("sqlite", sqlitePath)
 		} else {
-			url, err := BuildSQLURL()
+			var url string
+			url, err = BuildSQLURL()
 			if err != nil {
 				return err
 			}
 			sqlDB, err = db.Init("mysql", url)
-
 		}
 		if err != nil {
 			return err
@@ -417,6 +417,10 @@ func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error
 
 	for _, task := range tasks {
 		file := matchFile(task, files)
+		if file == nil {
+			return fmt.Errorf("unknown task: %+v", task)
+		}
+
 		switch file.Status {
 		case set.Failed:
 			err = sqlDB.TaskFailed(task)
@@ -431,22 +435,6 @@ func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error
 	}
 
 	return err
-}
-
-func transferFailedFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
-	err := sqlDB.CompleteDiscovery(s, slices.Values(newFiles), noSeq[*db.File])
-	if err != nil {
-		return err
-	}
-
-	for range maxAttempts {
-		err = transferFileStatuses(p, sqlDB, oldFiles)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
