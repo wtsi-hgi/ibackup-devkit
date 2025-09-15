@@ -28,6 +28,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"errors"
 	"fmt"
 	"github.com/wtsi-hgi/ibackup/transfer"
 	"maps"
@@ -46,11 +47,10 @@ import (
 )
 
 const (
-	_      = iota // ignore first value (0)
-	KB int = 1 << (10 * iota)
-	MB
+	_     = iota // ignore first value (0)
+	_ int = 1 << (10 * iota)
+	_
 	GB
-	TB
 )
 
 func TestBolt(t *testing.T) {
@@ -171,6 +171,9 @@ func TestConvert(t *testing.T) {
 		resetDatabase(t)
 
 		url, err := cmd.BuildSQLURL()
+		if errors.Is(err, cmd.ErrNoSQLCredentials) {
+			t.Skip("skipping test: no SQL credentials")
+		}
 		So(err, ShouldBeNil)
 
 		sqlDB, err := db.Init("mysql", url)
@@ -376,6 +379,9 @@ func resetDatabase(t *testing.T) {
 	t.Helper()
 
 	url, err := cmd.BuildSQLURL()
+	if errors.Is(err, cmd.ErrNoSQLCredentials) {
+		t.Skip("skipping test: no SQL credentials")
+	}
 	So(err, ShouldBeNil)
 
 	sqlDB, err := sql.Open("mysql", url)
@@ -562,23 +568,6 @@ func callAndLogError(t *testing.T, f func() error) {
 	if err != nil {
 		t.Log(err)
 	}
-}
-
-// Difference returns a slice containing all elements of slice1 that are not present in slice2.
-func Difference[T comparable](slice1, slice2 []T) []T {
-	lookup := make(map[T]struct{})
-	for _, v := range slice2 {
-		lookup[v] = struct{}{}
-	}
-
-	var diff []T
-	for _, v := range slice1 {
-		if _, found := lookup[v]; !found {
-			diff = append(diff, v)
-		}
-	}
-
-	return diff
 }
 
 func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []string) []*set.Entry {

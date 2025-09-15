@@ -196,6 +196,20 @@ func transferSet(sqlDB *db.DB, s *set.Set) (*db.Set, error) {
 
 	if s.Hide {
 		err = sqlDB.SetSetHidden(sqlSet)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if s.Warning != "" {
+		err = sqlDB.SetSetWarning(sqlSet)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if s.Error != "" {
+		err = sqlDB.SetSetError(sqlSet)
 	}
 
 	return sqlSet, err
