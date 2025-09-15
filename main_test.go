@@ -277,6 +277,9 @@ func TestConvert(t *testing.T) {
 					filesMap[s] = entries
 				}
 
+				// at this point you may have the same path in two different sets with two different inodes
+				// this is valid and reflects the situation when a backed-up file was deleted and recreated
+
 				printTestSetup(filesMap)
 
 				err = boltDB.Close()
@@ -291,6 +294,7 @@ func TestConvert(t *testing.T) {
 					for _, s := range testSets {
 						t.Logf("\ncheck set %s", s.Name)
 
+						// we do not transfer empty sets
 						if len(filesMap[s]) == 0 {
 							_, err = sqlDB.GetSet(s.Name, s.Requester)
 							So(err, ShouldNotBeNil)
@@ -487,6 +491,7 @@ func checkFilesIdentical(t *testing.T, files1 []*set.Entry, files2 []*db.File) {
 			So(FileStatusToString(file.Status), ShouldBeBlank)
 		} else {
 			So(FileStatusToString(file.Status), ShouldEqual, fileMatch.Status.String())
+			SkipSo(file.LastUpload, ShouldEqual, fileMatch.LastAttempt) // TODO
 		}
 	}
 }
@@ -574,8 +579,10 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 	t.Helper()
 
 	entryTypes := []set.EntryType{
-		set.Regular, set.Hardlink, set.Symlink, set.Abnormal, set.Unknown,
+		set.Regular, set.Symlink, set.Abnormal, set.Unknown,
 	}
+
+	entryTypesWithHardlink := append(entryTypes, set.Hardlink)
 
 	entryStatuses := []set.EntryStatus{
 		set.Uploaded, set.Failed, set.Replaced, set.Skipped, set.Orphaned,
@@ -609,7 +616,11 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 		entry, err = boltDB.SetEntryStatus(request)
 		So(err, ShouldBeNil)
 
-		entry.Type = randomChoice(entryTypes...)
+		if i == 0 || countRegularEntries(entries) == 0 {
+			entry.Type = randomChoice(entryTypes...)
+		} else {
+			entry.Type = randomChoice(entryTypesWithHardlink...)
+		}
 
 		switch entry.Type {
 		case set.Abnormal:
@@ -623,6 +634,12 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 		entry.Size = uint64(rand.Intn(GB))
 		entry.Inode = uint64(rand.Int31())
 
+		if entry.Type == set.Hardlink {
+			randomEntry := pickRandomEntry(entries, set.Regular)
+			entry.Inode = randomEntry.Inode
+			entry.Size = randomEntry.Size
+		}
+
 		err = boltDB.UpdateEntry(s.ID(), file, entry)
 		So(err, ShouldBeNil)
 
@@ -630,6 +647,40 @@ func setRandomFileProperties(t *testing.T, boltDB *set.DB, s *set.Set, files []s
 	}
 
 	return entries
+}
+
+func countRegularEntries(entries []*set.Entry) int {
+	var count int
+
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+
+		if entry.Type == set.Regular {
+			count++
+		}
+	}
+
+	return count
+}
+
+func pickRandomEntry(entries []*set.Entry, entryType set.EntryType) *set.Entry {
+	choices := make([]int, 0, len(entries))
+
+	for i, entry := range entries {
+		if entry == nil {
+			continue
+		}
+
+		if entry.Type == entryType {
+			choices = append(choices, i)
+		}
+	}
+
+	index := randomChoice(choices...)
+
+	return entries[index]
 }
 
 func updateSetProperties(t *testing.T, boltDB *set.DB, s *set.Set, isReadOnly bool, entries []*set.Entry) *set.Set {

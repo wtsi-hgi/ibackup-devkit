@@ -4,15 +4,16 @@ import (
 	"errors"
 	"fmt"
 	"github.com/spf13/cobra"
-	"github.com/wtsi-hgi/ibackup/transfer"
 	"log"
 	"os"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/wtsi-hgi/ibackup-devkit/convert"
 	"github.com/wtsi-hgi/ibackup/db"
 	"github.com/wtsi-hgi/ibackup/set"
+	"github.com/wtsi-hgi/ibackup/transfer"
 )
 
 const maxAttempts = 3
@@ -72,22 +73,31 @@ var convertCmd = &cobra.Command{
 			return err
 		}
 
-		var sqlDB *db.DB
+		var driver string
+		var connection string
 
 		if sqlitePath != "" {
-			sqlDB, err = db.Init("sqlite", sqlitePath)
+			driver = "sqlite"
+			connection = sqlitePath
 		} else {
-			var url string
-			url, err = BuildSQLURL()
+			driver = "mysql"
+			connection, err = BuildSQLURL()
 			if err != nil {
 				return err
 			}
-			sqlDB, err = db.Init("mysql", url)
 		}
+
+		sqlDB, err := db.Init(driver, connection)
 		if err != nil {
 			return err
 		}
 
+		dbHelper, err := convert.NewDBHelper(driver, connection)
+		if err != nil {
+			return err
+		}
+
+		defer callAndLogError(dbHelper.Close)
 		defer callAndLogError(sqlDB.Close)
 		defer callAndLogError(sqlDB.RemoveStaleProcesses)
 
@@ -104,7 +114,7 @@ var convertCmd = &cobra.Command{
 				return err
 			}
 
-			err = transferAllDataForSet(boltDB, sqlDB, s)
+			err = transferAllDataForSet(boltDB, sqlDB, dbHelper, s)
 			if err != nil {
 				return err
 			}
@@ -165,13 +175,13 @@ func validateSet(s *set.Set, boltDB *set.DB) error {
 	return nil
 }
 
-func transferAllDataForSet(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
+func transferAllDataForSet(boltDB *set.DB, sqlDB *db.DB, dbHelper *convert.DBHelper, s *set.Set) error {
 	newSet, err := transferSet(sqlDB, s)
 	if err != nil {
 		return err
 	}
 
-	err = transferFiles(boltDB, sqlDB, s)
+	err = transferFiles(boltDB, sqlDB, dbHelper, s)
 	if err != nil {
 		return err
 	}
@@ -329,9 +339,9 @@ func convertReason(reason string) (db.Reason, error) {
 	return value, nil
 }
 
-// I need a 2-staged transfer. First I partially transfer not-complete files (replaced, orphaned),
-// then I transfer all files
-func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
+// 2-staged transfer. First, we partially transfer not-complete files (replaced, orphaned).
+// Then we transfer all files.
+func transferFiles(boltDB *set.DB, sqlDB *db.DB, dbHelper *convert.DBHelper, s *set.Set) error {
 	files, err := boltDB.GetPureFileEntries(s.ID())
 	if err != nil {
 		return err
@@ -380,12 +390,19 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 		}
 	}
 
+	notCompleteFiles := slices.Concat(replacedFiles, orphanedFiles)
+	allFiles := slices.Concat(normalFiles, notCompleteFiles, failedFiles)
+
+	err = handleFilesWithConflictingInode(dbHelper, allFiles)
+	if err != nil {
+		return err
+	}
+
 	p, err := sqlDB.RegisterProcess()
 	if err != nil {
 		return err
 	}
 
-	notCompleteFiles := slices.Concat(replacedFiles, orphanedFiles)
 	err = uploadFiles(p, newSet, notCompleteFiles, files, sqlDB)
 	if err != nil {
 		return err
@@ -399,7 +416,6 @@ func transferFiles(boltDB *set.DB, sqlDB *db.DB, s *set.Set) error {
 		file.Mtime = correctMTimes[file.LocalPath]
 	}
 
-	allFiles := slices.Concat(normalFiles, notCompleteFiles, failedFiles)
 	err = uploadFiles(p, newSet, allFiles, files, sqlDB)
 	if err != nil {
 		return err
@@ -439,13 +455,13 @@ func convertFile(file *set.Entry, boltDB *set.DB) (*db.File, error) {
 		Type:       newType,
 		Status:     newStatus,
 		// Btime: 0, no way to obtain
-		// Mtime: 0, no way to obtain
-		// Owner: "", no way to obtain
-		// Group: "", no way to obtain
+		Mtime: 0,  // FIXME set from iRODS csv dump
+		Owner: "", // FIXME set from iRODS csv dump
+		Group: "", // FIXME set from iRODS csv dump
 	}
 
 	if file.Type == set.Symlink {
-		newFile.SymlinkDest = ""
+		newFile.SymlinkDest = "" // FIXME set somehow
 	}
 
 	return newFile, nil
@@ -499,6 +515,43 @@ func convertFileStatus(status set.EntryStatus) (db.FileStatus, error) {
 	return newStatus, nil
 }
 
+// For cases when we want to insert a file with an inode not matching inode of an existing file with the same path.
+// If an existing file is newer, then replace an incoming inode with an existing one.
+// If an existing file is older, then replace an existing inode with a newer one.
+func handleFilesWithConflictingInode(dbHelper *convert.DBHelper, files []*db.File) error {
+	paths := make([]string, len(files))
+	pathMap := make(map[string]*db.File, len(files))
+
+	for i, file := range files {
+		paths[i] = file.LocalPath
+		pathMap[file.LocalPath] = file
+	}
+
+	records, err := dbHelper.GetRecords(paths)
+	if err != nil {
+		return err
+	}
+
+	for _, record := range records {
+		file := pathMap[record.LocalPath]
+		if file.Inode == record.Inode {
+			continue
+		}
+
+		if record.Uploaded.Before(file.LastUpload) {
+			file.Inode = record.Inode
+		} else {
+			err = dbHelper.ReplaceInode(record.HardlinkID, file.Inode)
+			if err != nil {
+				return err
+
+			}
+		}
+	}
+
+	return nil
+}
+
 func uploadFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.Entry, sqlDB *db.DB) error {
 	if len(newFiles) == 0 {
 		return nil
@@ -516,6 +569,15 @@ func uploadFiles(p *db.Process, s *db.Set, newFiles []*db.File, oldFiles []*set.
 		}
 	}
 
+	tasks, err := collectTasks(sqlDB.ReserveTasks(p, 1))
+	if err != nil {
+		return err
+	}
+
+	if len(tasks) > 0 {
+		return fmt.Errorf("unexpected tasks: %v\nset: %+v", tasks, s)
+	}
+
 	return nil
 }
 
@@ -524,11 +586,7 @@ func noSeq[T any](_ func(T) bool) {}
 func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error {
 	itErr := sqlDB.ReserveTasks(p, len(files))
 
-	var tasks []*db.Task
-	err := itErr.ForEach(func(task *db.Task) error {
-		tasks = append(tasks, task)
-		return nil
-	})
+	tasks, err := collectTasks(itErr)
 	if err != nil {
 		return err
 	}
@@ -536,7 +594,7 @@ func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error
 	for _, task := range tasks {
 		file := matchFile(task, files)
 		if file == nil {
-			return fmt.Errorf("unknown task: %+v", task)
+			return fmt.Errorf("unexpected task: %+v\nfile: %#v", task, files)
 		}
 
 		switch file.Status {
@@ -550,9 +608,28 @@ func transferFileStatuses(p *db.Process, sqlDB *db.DB, files []*set.Entry) error
 		default:
 			err = fmt.Errorf("%w: Cannot handle file %s with status %s", ErrWrongStatus, file.Path, file.Status)
 		}
+
+		if err != nil {
+			return err
+		}
 	}
 
-	return err
+	return nil
+}
+
+func collectTasks(itErr *db.IterErr[*db.Task]) ([]*db.Task, error) {
+	var tasks []*db.Task
+
+	err := itErr.ForEach(func(task *db.Task) error {
+		tasks = append(tasks, task)
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return tasks, err
 }
 
 func matchFile(task *db.Task, files []*set.Entry) *set.Entry {
